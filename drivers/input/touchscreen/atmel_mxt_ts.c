@@ -2,6 +2,7 @@
  * Atmel maXTouch Touchscreen driver
  *
  * Copyright (C) 2010 Samsung Electronics Co.Ltd
+ * Copyright (C) 2011 Atmel Corporation
  * Author: Joonyoung Shim <jy0922.shim@samsung.com>
  *
  * This program is free software; you can redistribute  it and/or modify it
@@ -176,11 +177,14 @@
 
 /* Define for MXT_GEN_COMMAND_T6 */
 #define MXT_BOOT_VALUE		0xa5
+#define MXT_RESET_VALUE		0x01
 #define MXT_BACKUP_VALUE	0x55
-#define MXT_BACKUP_TIME		25	/* msec */
-#define MXT_RESET_TIME		65	/* msec */
 
-#define MXT_FWRESET_TIME	175	/* msec */
+/* Delay times */
+#define MXT_BACKUP_TIME		25	/* msec */
+#define MXT_RESET_TIME		200	/* msec */
+#define MXT_RESET_TIMEOUT	3000	/* msec */
+#define MXT_FWRESET_TIME	1000	/* msec */
 #define MXT_FW_CHG_TIMEOUT	300	/* msec */
 
 /* MXT_SPT_GPIOPWM_T19 field */
@@ -258,16 +262,17 @@ struct mxt_data {
 	unsigned int irq;
 	unsigned int max_x;
 	unsigned int max_y;
-	bool in_bootloader;
+	bool in_bootloader_or_reset;
 
 	/* Cached parameters from object table */
 	u8 T6_reportid;
+	u16 T6_address;
 	u8 T9_reportid_min;
 	u8 T9_reportid_max;
 	u8 T19_reportid;
 
 	/* for fw update in bootloader */
-	struct completion bl_completion;
+	struct completion chg_completion;
 };
 
 static inline size_t mxt_obj_size(const struct mxt_object *obj)
@@ -354,7 +359,7 @@ static void mxt_dump_message(struct device *dev,
 static int mxt_wait_for_chg(struct mxt_data *data, unsigned int timeout_ms)
 {
 	struct device *dev = &data->client->dev;
-	struct completion *comp = &data->bl_completion;
+	struct completion *comp = &data->chg_completion;
 	unsigned long timeout = msecs_to_jiffies(timeout_ms);
 	long ret;
 
@@ -686,13 +691,73 @@ static irqreturn_t mxt_interrupt(int irq, void *dev_id)
 {
 	struct mxt_data *data = dev_id;
 
-	if (data->in_bootloader) {
+	if (data->in_bootloader_or_reset) {
 		/* bootloader state transition completion */
-		complete(&data->bl_completion);
+		complete(&data->chg_completion);
 		return IRQ_HANDLED;
 	}
 
 	return mxt_process_messages_until_invalid(data);
+}
+
+static int mxt_t6_command(struct mxt_data *data, u16 cmd_offset,
+			  u8 value, bool wait)
+{
+	u16 reg;
+	u8 command_register;
+	int timeout_counter = 0;
+	int ret;
+
+	reg = data->T6_address + cmd_offset;
+
+	ret = mxt_write_reg(data->client, reg, value);
+	if (ret)
+		return ret;
+
+	if (!wait)
+		return 0;
+
+	do {
+		msleep(20);
+		ret = __mxt_read_reg(data->client, reg, 1, &command_register);
+		if (ret)
+			return ret;
+	} while ((command_register != 0) && (timeout_counter++ <= 100));
+
+	if (timeout_counter > 100) {
+		dev_err(&data->client->dev, "Command failed!\n");
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int mxt_soft_reset(struct mxt_data *data, u8 value)
+{
+	struct device *dev = &data->client->dev;
+	int ret = 0;
+
+	dev_info(dev, "Resetting chip\n");
+
+	data->in_bootloader_or_reset = true;
+	INIT_COMPLETION(data->chg_completion);
+
+	ret = mxt_t6_command(data, MXT_COMMAND_RESET, value, false);
+	if (ret)
+		goto out;
+
+	/* As per spec, ignore interrupt line for 200ms */
+	msleep(MXT_RESET_TIME);
+
+	ret = mxt_wait_for_chg(data, MXT_RESET_TIMEOUT);
+	if (ret) {
+		dev_warn(dev, "No response after reset!\n");
+		goto out;
+	}
+
+out:
+	data->in_bootloader_or_reset = false;
+	return ret;
 }
 
 static int mxt_check_reg_init(struct mxt_data *data)
@@ -855,6 +920,7 @@ static int mxt_get_object_table(struct mxt_data *data)
 		switch (object->type) {
 		case MXT_GEN_COMMAND_T6:
 			data->T6_reportid = min_id;
+			data->T6_address = object->start_address;
 			break;
 		case MXT_TOUCH_MULTI_T9:
 			data->T9_reportid_min = min_id;
@@ -910,16 +976,9 @@ static int mxt_initialize(struct mxt_data *data)
 
 	mxt_handle_pdata(data);
 
-	/* Backup to memory */
-	mxt_write_object(data, MXT_GEN_COMMAND_T6,
-			MXT_COMMAND_BACKUPNV,
-			MXT_BACKUP_VALUE);
-	msleep(MXT_BACKUP_TIME);
-
-	/* Soft reset */
-	mxt_write_object(data, MXT_GEN_COMMAND_T6,
-			MXT_COMMAND_RESET, 1);
-	msleep(MXT_RESET_TIME);
+	error = mxt_t6_command(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_VALUE, false);
+	if (!error)
+		mxt_soft_reset(data, MXT_RESET_VALUE);
 
 	/* Update matrix size at info struct */
 	error = mxt_read_reg(client, MXT_MATRIX_X_SIZE, &val);
@@ -1059,9 +1118,9 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	}
 
 	/* Change to the bootloader mode */
-	mxt_write_object(data, MXT_GEN_COMMAND_T6,
-			MXT_COMMAND_RESET, MXT_BOOT_VALUE);
-	msleep(MXT_RESET_TIME);
+	ret = mxt_soft_reset(data, MXT_BOOT_VALUE);
+	if (ret)
+		return ret;
 
 	/* Change to slave address of bootloader */
 	if (client->addr == MXT_APP_LOW)
@@ -1069,8 +1128,8 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	else
 		client->addr = MXT_BOOT_HIGH;
 
-	data->in_bootloader = true;
-	INIT_COMPLETION(data->bl_completion);
+	data->in_bootloader_or_reset = true;
+	INIT_COMPLETION(data->chg_completion);
 
 	ret = mxt_check_bootloader(data, MXT_WAITING_BOOTLOAD_CMD);
 	if (ret)
@@ -1114,7 +1173,7 @@ out:
 	else
 		client->addr = MXT_APP_HIGH;
 
-	data->in_bootloader = false;
+	data->in_bootloader_or_reset = false;
 	return ret;
 }
 
@@ -1232,7 +1291,7 @@ static int mxt_probe(struct i2c_client *client,
 	data->pdata = pdata;
 	data->irq = client->irq;
 
-	init_completion(&data->bl_completion);
+	init_completion(&data->chg_completion);
 
 	mxt_calc_resolution(data);
 
@@ -1359,11 +1418,7 @@ static int mxt_resume(struct device *dev)
 	struct mxt_data *data = i2c_get_clientdata(client);
 	struct input_dev *input_dev = data->input_dev;
 
-	/* Soft reset */
-	mxt_write_object(data, MXT_GEN_COMMAND_T6,
-			MXT_COMMAND_RESET, 1);
-
-	msleep(MXT_RESET_TIME);
+	mxt_soft_reset(data, MXT_RESET_VALUE);
 
 	mutex_lock(&input_dev->mutex);
 
