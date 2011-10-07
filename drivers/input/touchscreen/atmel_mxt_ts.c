@@ -271,6 +271,7 @@ struct mxt_data {
 	u16 mem_size;
 	struct bin_attribute mem_access_attr;
 	bool debug_enabled;
+	u32 config_crc;
 
 	/* Cached parameters from object table */
 	u8 T6_reportid;
@@ -643,7 +644,7 @@ static void mxt_input_touchevent(struct mxt_data *data,
 	}
 }
 
-static unsigned mxt_extract_T6_csum(const u8 *csum)
+static u16 mxt_extract_T6_csum(const u8 *csum)
 {
 	return csum[0] | (csum[1] << 8) | (csum[2] << 16);
 }
@@ -674,9 +675,9 @@ static irqreturn_t mxt_process_messages_until_invalid(struct mxt_data *data)
 
 		if (reportid == data->T6_reportid) {
 			u8 status = payload[0];
-			unsigned csum = mxt_extract_T6_csum(&payload[1]);
+			data->config_crc = mxt_extract_T6_csum(&payload[1]);
 			dev_dbg(dev, "Status: %02x Config Checksum: %06x\n",
-				status, csum);
+				status, data->config_crc);
 		} else if (mxt_is_T9_message(data, &message)) {
 			int id = reportid - data->T9_reportid_min;
 			mxt_input_touchevent(data, &message, id);
@@ -773,6 +774,19 @@ out:
 	return ret;
 }
 
+static void mxt_read_current_crc(struct mxt_data *data)
+{
+	/* on failure, CRC is set to 0 and config will always be downloaded */
+	data->config_crc = 0;
+
+	mxt_t6_command(data, MXT_COMMAND_REPORTALL, 1, true);
+
+	/* Read all messages until invalid, this will update the config crc
+	 * stored in mxt_data. On failure, CRC is set to 0 and config will
+	 * always be downloaded */
+	mxt_process_messages_until_invalid(data);
+}
+
 static int mxt_check_reg_init(struct mxt_data *data)
 {
 	const struct mxt_platform_data *pdata = data->pdata;
@@ -785,6 +799,16 @@ static int mxt_check_reg_init(struct mxt_data *data)
 	if (!pdata->config) {
 		dev_dbg(dev, "No cfg data defined, skipping reg init\n");
 		return 0;
+	}
+
+	mxt_read_current_crc(data);
+
+	if (data->config_crc == pdata->config_crc) {
+		dev_info(dev, "Config CRC 0x%06X: OK\n", data->config_crc);
+		return 0;
+	} else {
+		dev_info(dev, "Config CRC 0x%06X: does not match 0x%06X\n",
+				data->config_crc, pdata->config_crc);
 	}
 
 	for (i = 0; i < data->info.object_num; i++) {
@@ -805,6 +829,16 @@ static int mxt_check_reg_init(struct mxt_data *data)
 			return ret;
 		index += size;
 	}
+
+	ret = mxt_t6_command(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_VALUE, false);
+	if (ret)
+		return ret;
+
+	ret = mxt_soft_reset(data, MXT_RESET_VALUE);
+	if (ret)
+		return ret;
+
+	dev_info(dev, "Config written\n");
 
 	return 0;
 }
@@ -951,10 +985,6 @@ static int mxt_initialize(struct mxt_data *data)
 			error);
 		goto err_free_object_table;
 	}
-
-	error = mxt_t6_command(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_VALUE, false);
-	if (!error)
-		mxt_soft_reset(data, MXT_RESET_VALUE);
 
 	/* Update matrix size at info struct */
 	error = mxt_read_reg(client, MXT_MATRIX_X_SIZE, &val);
