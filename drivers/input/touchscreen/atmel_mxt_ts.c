@@ -13,6 +13,7 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/i2c.h>
@@ -256,12 +257,16 @@ struct mxt_data {
 	unsigned int irq;
 	unsigned int max_x;
 	unsigned int max_y;
+	bool in_bootloader;
 
 	/* Cached parameters from object table */
 	u8 T6_reportid;
 	u8 T9_reportid_min;
 	u8 T9_reportid_max;
 	u8 T19_reportid;
+
+	/* for fw update in bootloader */
+	struct completion bl_completion;
 };
 
 static inline size_t mxt_obj_size(const struct mxt_object *obj)
@@ -345,12 +350,51 @@ static void mxt_dump_message(struct device *dev,
 		message->reportid, 7, message->message);
 }
 
-static int mxt_check_bootloader(struct i2c_client *client,
-				     unsigned int state)
+static int mxt_wait_for_chg(struct mxt_data *data, unsigned int timeout_ms)
 {
+	struct device *dev = &data->client->dev;
+	struct completion *comp = &data->bl_completion;
+	unsigned long timeout = msecs_to_jiffies(timeout_ms);
+	long ret;
+
+	ret = wait_for_completion_interruptible_timeout(comp, timeout);
+	if (ret < 0) {
+		dev_err(dev, "Wait for completion interrupted.\n");
+		return -EINTR;
+	} else if (ret == 0) {
+		dev_err(dev, "Wait for completion timed out.\n");
+		return -ETIMEDOUT;
+	}
+	return 0;
+}
+
+static int mxt_check_bootloader(struct mxt_data *data, unsigned int state)
+{
+	struct i2c_client *client = data->client;
 	u8 val;
+	int ret;
 
 recheck:
+	if (state != MXT_WAITING_BOOTLOAD_CMD) {
+		/*
+		 * In application update mode, the interrupt
+		 * line signals state transitions. We must wait for the
+		 * CHG assertion before reading the status byte.
+		 * Once the status byte has been read, the line is deasserted.
+		 */
+		ret = mxt_wait_for_chg(data, 300);
+		if (ret) {
+			/*
+			 * TODO: handle -EINTR better by terminating fw update
+			 * process before returning to userspace by writing
+			 * length 0x000 to device (iff we are in
+			 * WAITING_FRAME_DATA state).
+			 */
+			dev_err(&client->dev, "Update wait error %d\n", ret);
+			return ret;
+		}
+	}
+
 	if (i2c_master_recv(client, &val, 1) != 1) {
 		dev_err(&client->dev, "%s: i2c recv failed\n", __func__);
 		return -EIO;
@@ -592,9 +636,8 @@ static bool mxt_is_T9_message(struct mxt_data *data, struct mxt_message *msg)
 	return (id >= data->T9_reportid_min && id <= data->T9_reportid_max);
 }
 
-static irqreturn_t mxt_interrupt(int irq, void *dev_id)
+static irqreturn_t mxt_process_messages_until_invalid(struct mxt_data *data)
 {
-	struct mxt_data *data = dev_id;
 	struct mxt_message message;
 	const u8 *payload = &message.message[0];
 	struct device *dev = &data->client->dev;
@@ -632,6 +675,19 @@ static irqreturn_t mxt_interrupt(int irq, void *dev_id)
 	}
 
 	return IRQ_HANDLED;
+}
+
+static irqreturn_t mxt_interrupt(int irq, void *dev_id)
+{
+	struct mxt_data *data = dev_id;
+
+	if (data->in_bootloader) {
+		/* bootloader state transition completion */
+		complete(&data->bl_completion);
+		return IRQ_HANDLED;
+	}
+
+	return mxt_process_messages_until_invalid(data);
 }
 
 static int mxt_check_reg_init(struct mxt_data *data)
@@ -1008,7 +1064,10 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	else
 		client->addr = MXT_BOOT_HIGH;
 
-	ret = mxt_check_bootloader(client, MXT_WAITING_BOOTLOAD_CMD);
+	data->in_bootloader = true;
+	INIT_COMPLETION(data->bl_completion);
+
+	ret = mxt_check_bootloader(data, MXT_WAITING_BOOTLOAD_CMD);
 	if (ret)
 		goto out;
 
@@ -1016,8 +1075,7 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	mxt_unlock_bootloader(client);
 
 	while (pos < fw->size) {
-		ret = mxt_check_bootloader(client,
-						MXT_WAITING_FRAME_DATA);
+		ret = mxt_check_bootloader(data, MXT_WAITING_FRAME_DATA);
 		if (ret)
 			goto out;
 
@@ -1031,8 +1089,7 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 		/* Write one frame to device */
 		mxt_fw_write(client, fw->data + pos, frame_size);
 
-		ret = mxt_check_bootloader(client,
-						MXT_FRAME_CRC_PASS);
+		ret = mxt_check_bootloader(data, MXT_FRAME_CRC_PASS);
 		if (ret)
 			goto out;
 
@@ -1050,6 +1107,7 @@ out:
 	else
 		client->addr = MXT_APP_HIGH;
 
+	data->in_bootloader = false;
 	return ret;
 }
 
@@ -1059,8 +1117,6 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
 	int error;
-
-	disable_irq(data->irq);
 
 	error = mxt_load_fw(dev, MXT_FW_NAME);
 	if (error) {
@@ -1076,12 +1132,6 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 
 		mxt_initialize(data);
 	}
-
-	enable_irq(data->irq);
-
-	error = mxt_make_highchg(data);
-	if (error)
-		return error;
 
 	return count;
 }
@@ -1171,6 +1221,8 @@ static int mxt_probe(struct i2c_client *client,
 	data->input_dev = input_dev;
 	data->pdata = pdata;
 	data->irq = client->irq;
+
+	init_completion(&data->bl_completion);
 
 	mxt_calc_resolution(data);
 
