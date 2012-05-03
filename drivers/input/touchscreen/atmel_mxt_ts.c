@@ -181,6 +181,7 @@
 #define MXT_RESET_TIME		65	/* msec */
 
 #define MXT_FWRESET_TIME	175	/* msec */
+#define MXT_FW_CHG_TIMEOUT	300	/* msec */
 
 /* MXT_SPT_GPIOPWM_T19 field */
 #define MXT_GPIO0_MASK		0x04
@@ -382,7 +383,7 @@ recheck:
 		 * CHG assertion before reading the status byte.
 		 * Once the status byte has been read, the line is deasserted.
 		 */
-		ret = mxt_wait_for_chg(data, 300);
+		ret = mxt_wait_for_chg(data, MXT_FW_CHG_TIMEOUT);
 		if (ret) {
 			/*
 			 * TODO: handle -EINTR better by terminating fw update
@@ -1098,6 +1099,8 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 		dev_dbg(dev, "Updated %d bytes / %zd bytes\n", pos, fw->size);
 	}
 
+	ret = mxt_wait_for_chg(data, MXT_FW_CHG_TIMEOUT);
+
 out:
 	release_firmware(fw);
 
@@ -1123,11 +1126,14 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 		dev_err(dev, "The firmware update failed(%d)\n", error);
 		count = error;
 	} else {
+
+		error = mxt_wait_for_chg(data, MXT_FWRESET_TIME);
+		if (error) {
+			dev_err(dev, "No response!\n");
+			return error;
+		}
+
 		dev_dbg(dev, "The firmware update succeeded\n");
-
-		/* Wait for reset */
-		msleep(MXT_FWRESET_TIME);
-
 		mxt_free_object_table(data);
 
 		mxt_initialize(data);
