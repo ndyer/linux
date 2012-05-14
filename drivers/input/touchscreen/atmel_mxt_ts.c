@@ -243,7 +243,7 @@ struct mxt_data {
 	struct i2c_client *client;
 	struct input_dev *input_dev;
 	char phys[64];		/* device physical location */
-	const struct mxt_platform_data *pdata;
+	unsigned long irqflags;
 	struct mxt_object *object_table;
 	struct mxt_info info;
 	bool is_tp;
@@ -1760,17 +1760,23 @@ static void mxt_input_close(struct input_dev *dev)
 	mxt_stop(data);
 }
 
+static void mxt_handle_pdata(struct mxt_data *data)
+{
+	const struct mxt_platform_data *pdata = data->client->dev.platform_data;
+
+	if (!pdata)
+		data->irqflags = IRQF_TRIGGER_FALLING | IRQF_ONESHOT;
+	else
+		data->irqflags = pdata->irqflags | IRQF_ONESHOT;
+}
+
 static int mxt_probe(struct i2c_client *client,
 		const struct i2c_device_id *id)
 {
-	const struct mxt_platform_data *pdata = client->dev.platform_data;
 	struct mxt_data *data;
 	struct input_dev *input_dev;
 	int error;
 	unsigned int num_mt_slots;
-
-	if (!pdata)
-		return -EINVAL;
 
 	data = kzalloc(sizeof(struct mxt_data), GFP_KERNEL);
 	input_dev = input_allocate_device();
@@ -1782,10 +1788,12 @@ static int mxt_probe(struct i2c_client *client,
 
 	data->state = INIT;
 
+	mxt_handle_pdata(data);
 	data->is_tp = !strcmp(id->name, "atmel_mxt_tp");
 
 	input_dev->name = (data->is_tp) ? "Atmel maXTouch Touchpad" :
 					  "Atmel maXTouch Touchscreen";
+
 	snprintf(data->phys, sizeof(data->phys), "i2c-%u-%04x/input0",
 		 client->adapter->nr, client->addr);
 
@@ -1798,14 +1806,12 @@ static int mxt_probe(struct i2c_client *client,
 
 	data->client = client;
 	data->input_dev = input_dev;
-	data->pdata = pdata;
 	data->irq = client->irq;
 
 	init_completion(&data->chg_completion);
 
-	error = request_threaded_irq(client->irq, NULL, mxt_interrupt,
-				     pdata->irqflags | IRQF_ONESHOT,
-				     client->name, data);
+	error = request_threaded_irq(data->irq, NULL, mxt_interrupt,
+				     data->irqflags, client->name, data);
 	if (error) {
 		dev_err(&client->dev, "Failed to register interrupt\n");
 		goto err_free_mem;
@@ -1910,7 +1916,7 @@ err_unregister_device:
 err_free_object:
 	kfree(data->object_table);
 err_free_irq:
-	free_irq(client->irq, data);
+	free_irq(data->irq, data);
 err_free_mem:
 	input_free_device(input_dev);
 	kfree(data);
