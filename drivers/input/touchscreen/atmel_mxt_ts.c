@@ -219,7 +219,7 @@ struct mxt_data {
 	struct i2c_client *client;
 	struct input_dev *input_dev;
 	char phys[64];		/* device physical location */
-	const struct mxt_platform_data *pdata;
+	struct mxt_platform_data *pdata;
 	struct mxt_object *object_table;
 	struct mxt_info *info;
 	void *raw_info_block;
@@ -2811,15 +2811,7 @@ static int mxt_probe(struct i2c_client *client,
 		const struct i2c_device_id *id)
 {
 	struct mxt_data *data;
-	const struct mxt_platform_data *pdata = dev_get_platdata(&client->dev);
 	int error;
-
-#ifdef CONFIG_OF
-	if (!pdata && client->dev.of_node)
-		pdata = mxt_parse_dt(client);
-#endif
-	if (!pdata)
-		return -EINVAL;
 
 	data = kzalloc(sizeof(struct mxt_data), GFP_KERNEL);
 	if (!data) {
@@ -2831,16 +2823,34 @@ static int mxt_probe(struct i2c_client *client,
 		 client->adapter->nr, client->addr);
 
 	data->client = client;
-	data->pdata = pdata;
 	data->irq = client->irq;
+	data->pdata = dev_get_platdata(&client->dev);
 	i2c_set_clientdata(client, data);
+
+#ifdef CONFIG_OF
+	if (!data->pdata && client->dev.of_node)
+		data->pdata = mxt_parse_dt(client);
+#endif
+
+	if (!data->pdata) {
+		data->pdata = devm_kzalloc(&client->dev, sizeof(*data->pdata),
+					   GFP_KERNEL);
+		if (!data->pdata) {
+			dev_err(&client->dev, "Failed to allocate pdata\n");
+			error = -ENOMEM;
+			goto err_free_mem;
+		}
+
+		/* Set default parameters */
+		data->pdata->irqflags = IRQF_TRIGGER_FALLING;
+	}
 
 	init_completion(&data->bl_completion);
 	init_completion(&data->reset_completion);
 	init_completion(&data->crc_completion);
 
 	error = request_threaded_irq(client->irq, NULL, mxt_interrupt,
-				     pdata->irqflags | IRQF_ONESHOT,
+				     data->pdata->irqflags | IRQF_ONESHOT,
 				     client->name, data);
 	if (error) {
 		dev_err(&client->dev, "Failed to register interrupt\n");
