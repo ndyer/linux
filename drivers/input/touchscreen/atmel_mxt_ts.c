@@ -68,6 +68,7 @@
 #define MXT_SPT_DIGITIZER_T43		43
 #define MXT_SPT_MESSAGECOUNT_T44	44
 #define MXT_SPT_CTECONFIG_T46		46
+#define MXT_PROCI_ACTIVE_STYLUS_T63	63
 #define MXT_TOUCH_MULTITOUCHSCREEN_T100 100
 
 /* MXT_GEN_MESSAGE_T5 object */
@@ -131,6 +132,19 @@ struct t9_range {
 
 /* Define for MXT_PROCI_TOUCHSUPPRESSION_T42 */
 #define MXT_T42_MSG_TCHSUP	(1 << 0)
+
+/* T63 Stylus */
+#define MXT_T63_STYLUS_PRESS	(1 << 0)
+#define MXT_T63_STYLUS_RELEASE	(1 << 1)
+#define MXT_T63_STYLUS_MOVE		(1 << 2)
+#define MXT_T63_STYLUS_SUPPRESS	(1 << 3)
+
+#define MXT_T63_STYLUS_DETECT	(1 << 4)
+#define MXT_T63_STYLUS_TIP		(1 << 5)
+#define MXT_T63_STYLUS_ERASER	(1 << 6)
+#define MXT_T63_STYLUS_BARREL	(1 << 7)
+
+#define MXT_T63_STYLUS_PRESSURE_MASK	0x3F
 
 /* T100 Multiple Touch Touchscreen */
 #define MXT_T100_CTRL		0
@@ -235,6 +249,7 @@ struct mxt_data {
 	u8 num_touchids;
 	u8 multitouch;
 	struct t7_config t7_cfg;
+	u8 num_stylusids;
 	unsigned long t15_keystatus;
 
 	/* Cached parameters from object table */
@@ -252,6 +267,8 @@ struct mxt_data {
 	u8 T42_reportid_max;
 	u16 T44_address;
 	u8 T48_reportid;
+	u8 T63_reportid_min;
+	u8 T63_reportid_max;
 	u8 T100_reportid_min;
 	u8 T100_reportid_max;
 
@@ -933,6 +950,59 @@ static int mxt_proc_t48_messages(struct mxt_data *data, u8 *msg)
 	return 0;
 }
 
+static void mxt_proc_t63_messages(struct mxt_data *data, u8 *msg)
+{
+	struct device *dev = &data->client->dev;
+	struct input_dev *input_dev = data->input_dev;
+	u8 id;
+	u16 x, y;
+	u8 pressure;
+
+	/* stylus slots come after touch slots */
+	id = data->num_touchids + (msg[0] - data->T63_reportid_min);
+
+	if (id < 0 || id > (data->num_touchids + data->num_stylusids)) {
+		dev_err(dev, "invalid stylus id %d, max slot is %d\n",
+			id, data->num_stylusids);
+		return;
+	}
+
+	x = msg[3] | (msg[4] << 8);
+	y = msg[5] | (msg[6] << 8);
+	pressure = msg[7] & MXT_T63_STYLUS_PRESSURE_MASK;
+
+	dev_dbg(dev,
+		"[%d] %c%c%c%c x: %d y: %d pressure: %d stylus:%c%c%c%c\n",
+		id,
+		msg[1] & MXT_T63_STYLUS_SUPPRESS ? 'S' : '.',
+		msg[1] & MXT_T63_STYLUS_MOVE     ? 'M' : '.',
+		msg[1] & MXT_T63_STYLUS_RELEASE  ? 'R' : '.',
+		msg[1] & MXT_T63_STYLUS_PRESS    ? 'P' : '.',
+		x, y, pressure,
+		msg[2] & MXT_T63_STYLUS_BARREL   ? 'B' : '.',
+		msg[2] & MXT_T63_STYLUS_ERASER   ? 'E' : '.',
+		msg[2] & MXT_T63_STYLUS_TIP      ? 'T' : '.',
+		msg[2] & MXT_T63_STYLUS_DETECT   ? 'D' : '.');
+
+	input_mt_slot(input_dev, id);
+
+	if (msg[2] & MXT_T63_STYLUS_DETECT) {
+		input_mt_report_slot_state(input_dev, MT_TOOL_PEN, 1);
+		input_report_abs(input_dev, ABS_MT_POSITION_X, x);
+		input_report_abs(input_dev, ABS_MT_POSITION_Y, y);
+		input_report_abs(input_dev, ABS_MT_PRESSURE, pressure);
+	} else {
+		input_mt_report_slot_state(input_dev, MT_TOOL_PEN, 0);
+	}
+
+	input_report_key(input_dev, BTN_STYLUS,
+			 (msg[2] & MXT_T63_STYLUS_ERASER));
+	input_report_key(input_dev, BTN_STYLUS2,
+			 (msg[2] & MXT_T63_STYLUS_BARREL));
+
+	mxt_input_sync(data);
+}
+
 static int mxt_proc_message(struct mxt_data *data, u8 *message)
 {
 	u8 report_id = message[0];
@@ -962,6 +1032,9 @@ static int mxt_proc_message(struct mxt_data *data, u8 *message)
 	} else if (report_id == data->T19_reportid) {
 		mxt_input_button(data, message);
 		data->update_input = true;
+	} else if (report_id >= data->T63_reportid_min
+		   && report_id <= data->T63_reportid_max) {
+		mxt_proc_t63_messages(data, message);
 	} else if (report_id >= data->T15_reportid_min
 		   && report_id <= data->T15_reportid_max) {
 		mxt_proc_t15_messages(data, message);
@@ -1600,6 +1673,8 @@ static void mxt_free_object_table(struct mxt_data *data)
 	data->T42_reportid_max = 0;
 	data->T44_address = 0;
 	data->T48_reportid = 0;
+	data->T63_reportid_min = 0;
+	data->T63_reportid_max = 0;
 	data->T100_reportid_min = 0;
 	data->T100_reportid_max = 0;
 	data->max_reportid = 0;
@@ -1700,6 +1775,12 @@ static int mxt_get_object_table(struct mxt_data *data)
 			break;
 		case MXT_PROCG_NOISESUPPRESSION_T48:
 			data->T48_reportid = min_id;
+			break;
+		case MXT_PROCI_ACTIVE_STYLUS_T63:
+			data->T63_reportid_min = min_id;
+			data->T63_reportid_max = max_id;
+			data->num_stylusids = object->num_report_ids
+						* mxt_obj_instances(object);
 			break;
 		case MXT_TOUCH_MULTITOUCHSCREEN_T100:
 			data->multitouch = MXT_TOUCH_MULTITOUCHSCREEN_T100;
@@ -2011,6 +2092,14 @@ static int mxt_initialize_input_device(struct mxt_data *data)
 	    data->t100_aux_vect)) {
 		input_set_abs_params(input_dev, ABS_MT_ORIENTATION,
 				     0, 255, 0, 0);
+	}
+
+	/* For T63 active stylus */
+	if (data->T63_reportid_min) {
+		input_set_capability(input_dev, EV_KEY, BTN_STYLUS);
+		input_set_capability(input_dev, EV_KEY, BTN_STYLUS2);
+		input_set_abs_params(input_dev, ABS_MT_TOOL_TYPE,
+				0, MT_TOOL_MAX, 0, 0);
 	}
 
 	/* For T15 Key Array */
