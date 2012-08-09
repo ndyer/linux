@@ -18,6 +18,8 @@
 /* The platform data for the Atmel maXTouch touchscreen driver */
 struct mxt_platform_data {
 	unsigned long irqflags;
+	int *t15_keys;
+	int t15_num_keys;
 };
 
 #endif /* __LINUX_ATMEL_MXT_TS_H */
