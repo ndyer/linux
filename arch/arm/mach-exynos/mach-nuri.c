@@ -333,13 +333,8 @@ static struct i2c_board_info i2c1_devs[] __initdata = {
 
 /* TSP */
 static struct mxt_platform_data mxt_platform_data = {
-	.x_line			= 18,
-	.y_line			= 11,
 	.x_size			= 1024,
 	.y_size			= 600,
-	.blen			= 0x1,
-	.threshold		= 0x28,
-	.voltage		= 2800000,		/* 2.8V */
 	.orient			= MXT_DIAGONAL_COUNTER,
 	.irqflags		= IRQF_TRIGGER_FALLING,
 };

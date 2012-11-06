@@ -604,13 +604,8 @@ static struct i2c_board_info i2c5_devs[] __initdata = {
 
 /* I2C3 (TSP) */
 static struct mxt_platform_data qt602240_platform_data = {
-	.x_line		= 19,
-	.y_line		= 11,
 	.x_size		= 800,
 	.y_size		= 480,
-	.blen		= 0x11,
-	.threshold	= 0x28,
-	.voltage	= 2800000,		/* 2.8V */
 	.orient		= MXT_DIAGONAL,
 	.irqflags	= IRQF_TRIGGER_FALLING,
 };
