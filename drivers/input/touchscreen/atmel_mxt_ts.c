@@ -1842,60 +1842,31 @@ static void mxt_handle_pdata(struct mxt_data *data)
 		data->irqflags = pdata->irqflags | IRQF_ONESHOT;
 }
 
-static int mxt_probe(struct i2c_client *client,
-		const struct i2c_device_id *id)
+static int mxt_initialize_t9_input_device(struct mxt_data *data)
 {
-	struct mxt_data *data;
+	struct device *dev = &data->client->dev;
 	struct input_dev *input_dev;
 	int error;
 	unsigned int num_mt_slots;
 
-	data = kzalloc(sizeof(struct mxt_data), GFP_KERNEL);
 	input_dev = input_allocate_device();
-	if (!data || !input_dev) {
-		dev_err(&client->dev, "Failed to allocate memory\n");
-		error = -ENOMEM;
-		goto err_free_mem;
+	if (!input_dev) {
+		dev_err(dev, "Failed to allocate memory\n");
+		return -ENOMEM;
 	}
-
-	data->state = INIT;
-
-	mxt_handle_pdata(data);
-	data->is_tp = !strcmp(id->name, "atmel_mxt_tp");
 
 	input_dev->name = (data->is_tp) ? "Atmel maXTouch Touchpad" :
 					  "Atmel maXTouch Touchscreen";
 
-	snprintf(data->phys, sizeof(data->phys), "i2c-%u-%04x/input0",
-		 client->adapter->nr, client->addr);
-
 	input_dev->phys = data->phys;
 
 	input_dev->id.bustype = BUS_I2C;
-	input_dev->dev.parent = &client->dev;
+	input_dev->dev.parent = &data->client->dev;
 	input_dev->open = mxt_input_open;
 	input_dev->close = mxt_input_close;
 
-	data->client = client;
-	data->input_dev = input_dev;
-	data->irq = client->irq;
-
-	init_completion(&data->chg_completion);
-
-	error = request_threaded_irq(data->irq, NULL, mxt_interrupt,
-				     data->irqflags, client->name, data);
-	if (error) {
-		dev_err(&client->dev, "Failed to register interrupt\n");
-		goto err_free_mem;
-	}
-
-	error = mxt_initialize(data);
-	if (error)
-		goto err_free_irq;
-
-	__set_bit(EV_ABS, input_dev->evbit);
-	__set_bit(EV_KEY, input_dev->evbit);
-	__set_bit(BTN_TOUCH, input_dev->keybit);
+	set_bit(EV_ABS, input_dev->evbit);
+	input_set_capability(input_dev, EV_KEY, BTN_TOUCH);
 
 	if (data->is_tp) {
 		__set_bit(INPUT_PROP_POINTER, input_dev->propbit);
@@ -1927,8 +1898,11 @@ static int mxt_probe(struct i2c_client *client,
 	/* For multi touch */
 	num_mt_slots = data->T9_reportid_max - data->T9_reportid_min + 1;
 	error = input_mt_init_slots(input_dev, num_mt_slots, 0);
-	if (error)
-		goto err_free_object;
+	if (error) {
+		dev_err(dev, "Error %d initialising slots\n", error);
+		goto err_free_mem;
+	}
+
 	input_set_abs_params(input_dev, ABS_MT_TOUCH_MAJOR,
 			     0, MXT_MAX_AREA, 0, 0);
 	input_set_abs_params(input_dev, ABS_MT_POSITION_X,
@@ -1939,7 +1913,63 @@ static int mxt_probe(struct i2c_client *client,
 			     0, 255, 0, 0);
 
 	input_set_drvdata(input_dev, data);
+
+	error = input_register_device(input_dev);
+	if (error) {
+		dev_err(dev, "Error %d registering input device\n", error);
+		goto err_free_mem;
+	}
+
+	data->input_dev = input_dev;
+
+	return 0;
+
+err_free_mem:
+	input_free_device(input_dev);
+	return error;
+}
+
+static int mxt_probe(struct i2c_client *client,
+		const struct i2c_device_id *id)
+{
+	struct mxt_data *data;
+	int error;
+
+	data = kzalloc(sizeof(struct mxt_data), GFP_KERNEL);
+	if (!data) {
+		dev_err(&client->dev, "Failed to allocate memory\n");
+		return -ENOMEM;
+	}
+
+	data->state = INIT;
+
+	mxt_handle_pdata(data);
+
+	snprintf(data->phys, sizeof(data->phys), "i2c-%u-%04x/input0",
+		 client->adapter->nr, client->addr);
+
+	data->is_tp = !strcmp(id->name, "atmel_mxt_tp");
+
+	data->client = client;
+	data->irq = client->irq;
 	i2c_set_clientdata(client, data);
+
+	init_completion(&data->chg_completion);
+
+	error = request_threaded_irq(data->irq, NULL, mxt_interrupt,
+				     data->irqflags, client->name, data);
+	if (error) {
+		dev_err(&client->dev, "Failed to register interrupt\n");
+		goto err_free_mem;
+	}
+
+	error = mxt_initialize(data);
+	if (error)
+		goto err_free_irq;
+
+	error = mxt_initialize_t9_input_device(data);
+	if (error)
+		goto err_free_object;
 
 	if (data->state == APPMODE) {
 		error = mxt_make_highchg(data);
@@ -1948,13 +1978,6 @@ static int mxt_probe(struct i2c_client *client,
 				"Error %d clearing messages\n", error);
 			goto err_free_object;
 		}
-	}
-
-	error = input_register_device(input_dev);
-	if (error) {
-		dev_err(&client->dev, "Error %d registering input device\n",
-			error);
-		goto err_free_object;
 	}
 
 	error = sysfs_create_group(&client->dev.kobj, &mxt_attr_group);
@@ -1983,14 +2006,13 @@ static int mxt_probe(struct i2c_client *client,
 err_remove_sysfs_group:
 	sysfs_remove_group(&client->dev.kobj, &mxt_attr_group);
 err_unregister_device:
-	input_unregister_device(input_dev);
-	input_dev = NULL;
+	input_unregister_device(data->input_dev);
+	data->input_dev = NULL;
 err_free_object:
 	kfree(data->object_table);
 err_free_irq:
 	free_irq(data->irq, data);
 err_free_mem:
-	input_free_device(input_dev);
 	kfree(data);
 	return error;
 }
