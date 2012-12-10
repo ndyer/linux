@@ -120,6 +120,7 @@ struct t9_range {
 /* MXT_SPT_COMMSCONFIG_T18 */
 #define MXT_COMMS_CTRL		0
 #define MXT_COMMS_CMD		1
+#define MXT_COMMS_RETRIGEN      (1 << 6)
 
 /* Define for MXT_GEN_COMMAND_T6 */
 #define MXT_BOOT_VALUE		0xa5
@@ -233,6 +234,7 @@ struct mxt_data {
 	unsigned long t15_keystatus;
 	int t15_num_keys;
 	int t15_keys[MXT_T15_MAX_KEYS];
+	bool use_retrigen_workaround;
 
 	/* Cached parameters from object table */
 	u16 T5_address;
@@ -244,6 +246,7 @@ struct mxt_data {
 	u8 T9_reportid_max;
 	u8 T15_reportid_min;
 	u8 T15_reportid_max;
+	u16 T18_address;
 	u8 T19_reportid;
 	u8 T42_reportid_min;
 	u8 T42_reportid_max;
@@ -1500,6 +1503,7 @@ static void mxt_free_object_table(struct mxt_data *data)
 	data->T9_reportid_max = 0;
 	data->T15_reportid_min = 0;
 	data->T15_reportid_max = 0;
+	data->T18_address = 0;
 	data->T19_reportid = 0;
 	data->T42_reportid_min = 0;
 	data->T42_reportid_max = 0;
@@ -1567,6 +1571,9 @@ static int mxt_parse_object_table(struct mxt_data *data)
 		case MXT_TOUCH_KEYARRAY_T15:
 			data->T15_reportid_min = min_id;
 			data->T15_reportid_max = max_id;
+			break;
+		case MXT_SPT_COMMSCONFIG_T18:
+			data->T18_address = object->start_address;
 			break;
 		case MXT_PROCI_TOUCHSUPPRESSION_T42:
 			data->T42_reportid_min = min_id;
@@ -1747,6 +1754,31 @@ static int mxt_read_t9_resolution(struct mxt_data *data)
 	return 0;
 }
 
+static int mxt_check_retrigen(struct mxt_data *data)
+{
+	struct i2c_client *client = data->client;
+	int error;
+	int val;
+
+	if (data->irqflags & IRQF_TRIGGER_LOW)
+		return 0;
+
+	if (data->T18_address) {
+		error = __mxt_read_reg(client,
+				       data->T18_address + MXT_COMMS_CTRL,
+				       1, &val);
+		if (error)
+			return error;
+
+		if (val & MXT_COMMS_RETRIGEN)
+			return 0;
+	}
+
+	dev_warn(&client->dev, "Enabling RETRIGEN workaround\n");
+	data->use_retrigen_workaround = true;
+	return 0;
+}
+
 static int mxt_initialize(struct mxt_data *data)
 {
 	struct i2c_client *client = data->client;
@@ -1793,6 +1825,10 @@ retry_probe:
 		dev_err(&client->dev, "Failed to initialize power cfg\n");
 		goto err_free_object_table;
 	}
+
+	error = mxt_check_retrigen(data);
+	if (error)
+		goto err_free_object_table;
 
 	return 0;
 
@@ -2347,7 +2383,7 @@ static int mxt_probe(struct i2c_client *client,
 	if (error)
 		goto err_free_object;
 
-	if (data->state == APPMODE) {
+	if (data->state == APPMODE && data->use_retrigen_workaround) {
 		error = mxt_process_messages_until_invalid(data);
 		if (error) {
 			dev_err(&client->dev,
