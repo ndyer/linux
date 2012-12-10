@@ -25,6 +25,7 @@
 #include <linux/platform_data/atmel_mxt_ts.h>
 #include <linux/input/mt.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/of.h>
 #include <linux/slab.h>
 #include <asm/unaligned.h>
@@ -125,6 +126,7 @@ struct t9_range {
 /* MXT_SPT_COMMSCONFIG_T18 */
 #define MXT_COMMS_CTRL		0
 #define MXT_COMMS_CMD		1
+#define MXT_COMMS_RETRIGEN      (1 << 6)
 
 /* Define for MXT_GEN_COMMAND_T6 */
 #define MXT_BOOT_VALUE		0xa5
@@ -266,6 +268,7 @@ struct mxt_data {
 	unsigned long t15_keystatus;
 	u8 stylus_aux_pressure;
 	u8 stylus_aux_peak;
+	bool use_retrigen_workaround;
 
 	/* Cached parameters from object table */
 	u16 T5_address;
@@ -277,6 +280,7 @@ struct mxt_data {
 	u8 T9_reportid_max;
 	u8 T15_reportid_min;
 	u8 T15_reportid_max;
+	u16 T18_address;
 	u8 T19_reportid;
 	u8 T42_reportid_min;
 	u8 T42_reportid_max;
@@ -1387,6 +1391,31 @@ static u32 mxt_calculate_crc(u8 *base, off_t start_off, off_t end_off)
 	return crc;
 }
 
+static int mxt_check_retrigen(struct mxt_data *data)
+{
+	struct i2c_client *client = data->client;
+	int error;
+	int val;
+
+	if (irq_get_trigger_type(data->irq) & IRQF_TRIGGER_LOW)
+		return 0;
+
+	if (data->T18_address) {
+		error = __mxt_read_reg(client,
+				       data->T18_address + MXT_COMMS_CTRL,
+				       1, &val);
+		if (error)
+			return error;
+
+		if (val & MXT_COMMS_RETRIGEN)
+			return 0;
+	}
+
+	dev_warn(&client->dev, "Enabling RETRIGEN workaround\n");
+	data->use_retrigen_workaround = true;
+	return 0;
+}
+
 static int mxt_prepare_cfg_mem(struct mxt_data *data,
 			       const struct firmware *cfg,
 			       unsigned int data_pos,
@@ -1661,6 +1690,10 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *cfg)
 
 	mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_VALUE);
 
+	ret = mxt_check_retrigen(data);
+	if (ret)
+		goto release_mem;
+
 	ret = mxt_soft_reset(data);
 	if (ret)
 		goto release_mem;
@@ -1681,9 +1714,11 @@ static int mxt_acquire_irq(struct mxt_data *data)
 
 	enable_irq(data->irq);
 
-	error = mxt_process_messages_until_invalid(data);
-	if (error)
-		return error;
+	if (data->use_retrigen_workaround) {
+		error = mxt_process_messages_until_invalid(data);
+		if (error)
+			return error;
+	}
 
 	return 0;
 }
@@ -1712,6 +1747,7 @@ static void mxt_free_object_table(struct mxt_data *data)
 	data->T9_reportid_max = 0;
 	data->T15_reportid_min = 0;
 	data->T15_reportid_max = 0;
+	data->T18_address = 0;
 	data->T19_reportid = 0;
 	data->T42_reportid_min = 0;
 	data->T42_reportid_max = 0;
@@ -1790,6 +1826,9 @@ static int mxt_parse_object_table(struct mxt_data *data,
 		case MXT_TOUCH_KEYARRAY_T15:
 			data->T15_reportid_min = min_id;
 			data->T15_reportid_max = max_id;
+			break;
+		case MXT_SPT_COMMSCONFIG_T18:
+			data->T18_address = object->start_address;
 			break;
 		case MXT_PROCI_TOUCHSUPPRESSION_T42:
 			data->T42_reportid_min = min_id;
@@ -2328,6 +2367,10 @@ static int mxt_initialize(struct mxt_data *data)
 		mxt_send_bootloader_cmd(data, false);
 		msleep(MXT_FW_RESET_TIME);
 	}
+
+	error = mxt_check_retrigen(data);
+	if (error)
+		goto err_free_object_table;
 
 	error = mxt_acquire_irq(data);
 	if (error)
