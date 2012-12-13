@@ -1200,6 +1200,8 @@ static int mxt_check_retrigen(struct mxt_data *data)
 	return 0;
 }
 
+static int mxt_init_t7_power_cfg(struct mxt_data *data);
+
 /*
  * mxt_update_cfg - download configuration to chip
  *
@@ -1456,6 +1458,9 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *cfg)
 		goto release_mem;
 
 	dev_info(dev, "Config successfully updated\n");
+
+	/* T7 config may have changed */
+	mxt_init_t7_power_cfg(data);
 
 release_mem:
 	kfree(config_mem);
@@ -2004,16 +2009,16 @@ static int mxt_configure_objects(struct mxt_data *data,
 	struct device *dev = &data->client->dev;
 	int error;
 
-	if (cfg) {
-		error = mxt_update_cfg(data, cfg);
-		if (error)
-			dev_warn(dev, "Error %d updating config\n", error);
-	}
-
 	error = mxt_init_t7_power_cfg(data);
 	if (error) {
 		dev_err(dev, "Failed to initialize power cfg\n");
 		return error;
+	}
+
+	if (cfg) {
+		error = mxt_update_cfg(data, cfg);
+		if (error)
+			dev_warn(dev, "Error %d updating config\n", error);
 	}
 
 	error = mxt_initialize_t9_input_device(data);
