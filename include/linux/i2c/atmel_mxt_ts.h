@@ -20,6 +20,7 @@ struct mxt_platform_data {
 	unsigned long irqflags;
 	int *t15_keys;
 	int t15_num_keys;
+	unsigned long gpio_reset;
 };
 
 #endif /* __LINUX_ATMEL_MXT_TS_H */

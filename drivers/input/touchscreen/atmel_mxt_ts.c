@@ -22,6 +22,8 @@
 #include <linux/input/mt.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
+#include <linux/regulator/consumer.h>
+#include <linux/gpio.h>
 
 /* Firmware files */
 #define MXT_FW_NAME		"maxtouch.fw"
@@ -153,6 +155,8 @@ struct t9_range {
 #define MXT_FWRESET_TIME	1000	/* msec */
 #define MXT_FW_CHG_TIMEOUT	300	/* msec */
 #define MXT_WAKEUP_TIME		25	/* msec */
+#define MXT_REGULATOR_DELAY	150	/* msec */
+#define MXT_POWERON_DELAY	150	/* msec */
 
 /* MXT_SPT_GPIOPWM_T19 field */
 #define MXT_GPIO0_MASK		0x04
@@ -239,6 +243,10 @@ struct mxt_data {
 	int t15_num_keys;
 	int t15_keys[MXT_T15_MAX_KEYS];
 	bool use_retrigen_workaround;
+	bool use_regulator;
+	unsigned long gpio_reset;
+	struct regulator *reg_vdd;
+	struct regulator *reg_avdd;
 
 	/* Cached parameters from object table */
 	u16 T5_address;
@@ -1801,6 +1809,63 @@ static int mxt_check_retrigen(struct mxt_data *data)
 	return 0;
 }
 
+static void mxt_regulator_enable(struct mxt_data *data)
+{
+	gpio_set_value(data->gpio_reset, 0);
+	regulator_enable(data->reg_vdd);
+	regulator_enable(data->reg_avdd);
+	msleep(MXT_REGULATOR_DELAY);
+	gpio_set_value(data->gpio_reset, 1);
+	mxt_wait_for_chg(data, MXT_POWERON_DELAY);
+}
+
+static void mxt_regulator_disable(struct mxt_data *data)
+{
+	regulator_disable(data->reg_vdd);
+	regulator_disable(data->reg_avdd);
+}
+
+static void mxt_probe_regulators(struct mxt_data *data)
+{
+	struct device *dev = &data->client->dev;
+	int error;
+
+	/* According to maXTouch power sequencing specification, RESET line
+	 * must be kept low until some time after regulators come up to
+	 * voltage */
+	if (!data->gpio_reset) {
+		dev_warn(dev, "Must have reset GPIO to use regulator support\n");
+		goto fail;
+	}
+
+	data->reg_vdd = regulator_get(dev, "vdd");
+	if (IS_ERR(data->reg_vdd)) {
+		error = PTR_ERR(data->reg_vdd);
+		dev_err(dev, "Error %d getting vdd regulator\n", error);
+		goto fail;
+	}
+
+	data->reg_avdd = regulator_get(dev, "avdd");
+	if (IS_ERR(data->reg_vdd)) {
+		error = PTR_ERR(data->reg_vdd);
+		dev_err(dev, "Error %d getting avdd regulator\n", error);
+		goto fail_release;
+	}
+
+	data->use_regulator = true;
+	mxt_regulator_enable(data);
+
+	dev_dbg(dev, "Initialised regulators\n");
+	return;
+
+fail_release:
+	regulator_put(data->reg_vdd);
+fail:
+	data->reg_vdd = NULL;
+	data->reg_avdd = NULL;
+	data->use_regulator = false;
+}
+
 static int mxt_initialize(struct mxt_data *data)
 {
 	struct i2c_client *client = data->client;
@@ -2228,14 +2293,18 @@ static void mxt_start(struct mxt_data *data)
 	if (data->state != SUSPEND)
 		return;
 
-	/* Discard any messages still in message buffer from before chip went
-	 * to sleep */
-	mxt_process_messages_until_invalid(data);
+	if (data->use_regulator) {
+		mxt_regulator_enable(data);
+	} else {
+		/* Discard any messages still in message buffer from before
+		 * chip went to sleep */
+		mxt_process_messages_until_invalid(data);
 
-	mxt_set_t7_power_cfg(data, MXT_POWER_CFG_RUN);
+		mxt_set_t7_power_cfg(data, MXT_POWER_CFG_RUN);
 
-	/* Recalibrate since chip has been in deep sleep */
-	mxt_t6_command(data, MXT_COMMAND_CALIBRATE, 1, false);
+		/* Recalibrate since chip has been in deep sleep */
+		mxt_t6_command(data, MXT_COMMAND_CALIBRATE, 1, false);
+	}
 
 	enable_irq(data->irq);
 	data->state = APPMODE;
@@ -2248,7 +2317,10 @@ static void mxt_stop(struct mxt_data *data)
 
 	disable_irq(data->irq);
 
-	mxt_set_t7_power_cfg(data, MXT_POWER_CFG_DEEPSLEEP);
+	if (data->use_regulator)
+		mxt_regulator_disable(data);
+	else
+		mxt_set_t7_power_cfg(data, MXT_POWER_CFG_DEEPSLEEP);
 
 	data->state = SUSPEND;
 
@@ -2280,6 +2352,7 @@ static void mxt_handle_pdata(struct mxt_data *data)
 		data->irqflags = IRQF_TRIGGER_FALLING | IRQF_ONESHOT;
 	} else {
 		data->irqflags = pdata->irqflags | IRQF_ONESHOT;
+		data->gpio_reset = pdata->gpio_reset;
 
 		data->t15_num_keys = pdata->t15_num_keys;
 		for (key = 0; key < data->t15_num_keys; key++)
@@ -2432,6 +2505,8 @@ static int mxt_probe(struct i2c_client *client,
 		goto err_free_mem;
 	}
 
+	mxt_probe_regulators(data);
+
 	error = mxt_initialize(data);
 	if (error)
 		goto err_free_irq;
@@ -2494,6 +2569,8 @@ static int mxt_remove(struct i2c_client *client)
 	sysfs_remove_group(&client->dev.kobj, &mxt_attr_group);
 	free_irq(data->irq, data);
 	input_unregister_device(data->input_dev);
+	regulator_put(data->reg_avdd);
+	regulator_put(data->reg_vdd);
 	mxt_free_object_table(data);
 	kfree(data);
 
