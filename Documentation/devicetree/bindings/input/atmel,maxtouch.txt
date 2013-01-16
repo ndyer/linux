@@ -27,6 +27,8 @@ Optional properties for main touchpad device:
     MXT_SUSPEND_T9_CTRL - use T9.CTRL to turn off touch processing
     Definitions are in <dt-bindings/input/atmel_mxt_ts.h>.
 
+- atmel,reset-gpio: Configure RESET GPIO. Required for regulator support.
+
 Example:
 
 	touch@4b {

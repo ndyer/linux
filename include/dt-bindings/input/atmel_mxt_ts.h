@@ -16,6 +16,7 @@
 enum mxt_suspend_mode {
 	MXT_SUSPEND_DEEP_SLEEP = 0,
 	MXT_SUSPEND_T9_CTRL = 1,
+	MXT_SUSPEND_REGULATOR = 2,
 };
 
 #endif /* __DT_BINDINGS_ATMEL_MXT_TS_H */
