@@ -281,12 +281,17 @@ struct mxt_i2c_address_pair {
 };
 
 static const struct mxt_i2c_address_pair mxt_i2c_addresses[] = {
+#ifdef BOOTLOADER_1664_1188
+	{ 0x26, 0x4a },
+	{ 0x27, 0x4b },
+#else
 	{ 0x24, 0x4a },
 	{ 0x25, 0x4b },
 	{ 0x26, 0x4c },
 	{ 0x27, 0x4d },
 	{ 0x34, 0x5a },
 	{ 0x35, 0x5b },
+#endif
 };
 
 static bool mxt_object_readable(unsigned int type)
