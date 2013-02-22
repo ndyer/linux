@@ -1925,13 +1925,8 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 		mxt_initialize(data);
 	}
 
-	if (data->state == APPMODE) {
+	if (data->state == APPMODE)
 		enable_irq(data->irq);
-
-		error = mxt_process_messages_until_invalid(data);
-		if (error)
-			return error;
-	}
 
 	return count;
 }
@@ -2203,12 +2198,6 @@ static int mxt_probe(struct i2c_client *client,
 	if (error) {
 		dev_err(&client->dev, "Failed to register interrupt\n");
 		goto err_free_object;
-	}
-
-	if (data->state == APPMODE) {
-		error = mxt_process_messages_until_invalid(data);
-		if (error)
-			goto err_free_irq;
 	}
 
 	error = sysfs_create_group(&client->dev.kobj, &mxt_attr_group);
