@@ -1044,7 +1044,6 @@ static int mxt_t6_command(struct mxt_data *data, u16 cmd_offset, u8 value, bool 
 static int mxt_soft_reset(struct mxt_data *data, u8 value)
 {
 	int ret;
-	int timeout_counter = 0;
 	struct device *dev = &data->client->dev;
 
 	dev_info(dev, "Resetting chip\n");
@@ -1057,14 +1056,7 @@ static int mxt_soft_reset(struct mxt_data *data, u8 value)
 		msleep(MXT_RESET_NOCHGREAD);
 	} else {
 		msleep(MXT_RESET_TIME);
-
-		timeout_counter = 0;
-		while ((timeout_counter++ <= 100) && data->pdata->read_chg())
-			msleep(20);
-		if (timeout_counter > 100) {
-			dev_err(dev, "No response after reset!\n");
-			return -EIO;
-		}
+		mxt_wait_for_chg(data);
 	}
 
 	return 0;
