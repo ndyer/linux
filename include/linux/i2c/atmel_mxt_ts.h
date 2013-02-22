@@ -20,6 +20,7 @@ struct mxt_platform_data {
 	unsigned long irqflags;
 	u8(*read_chg) (void);
 	const char *input_name;
+	unsigned long gpio_reset;
 };
 
 #endif /* __LINUX_ATMEL_MXT_TS_H */
