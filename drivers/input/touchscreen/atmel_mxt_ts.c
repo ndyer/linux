@@ -1694,7 +1694,11 @@ static int mxt_initialize_t9_input_device(struct mxt_data *data)
 		return -ENOMEM;
 	}
 
-	input_dev->name = "Atmel maXTouch Touchscreen";
+	if (data->pdata->input_name)
+		input_dev->name = data->pdata->input_name;
+	else
+		input_dev->name = "Atmel maXTouch Touchscreen";
+
 	snprintf(data->phys, sizeof(data->phys), "i2c-%u-%04x/input0",
 		 client->adapter->nr, client->addr);
 	input_dev->phys = data->phys;
