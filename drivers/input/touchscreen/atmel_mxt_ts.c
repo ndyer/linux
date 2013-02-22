@@ -1390,6 +1390,8 @@ static int mxt_parse_object_table(struct mxt_data *data)
 	u8 reportid;
 	u16 end_address;
 
+	dev_dbg(&client->dev, "Object num: %d\n", data->info->object_num);
+
 	/* Valid Report IDs start counting from 1 */
 	reportid = 1;
 	data->mem_size = 0;
@@ -1567,6 +1569,12 @@ static int mxt_read_info_block(struct mxt_data *data)
 	data->info = (struct mxt_info *)buf;
 	data->object_table = (struct mxt_object *)(buf + MXT_OBJECT_START);
 
+	dev_info(&client->dev,
+			"Family ID: %u Variant ID: %u Firmware: V%u.%u.%02X",
+			data->info->family_id, data->info->variant_id,
+			data->info->version >> 4, data->info->version & 0xf,
+			data->info->build);
+
 	/* Parse object table information */
 	error = mxt_parse_object_table(data);
 	if (error) {
@@ -1574,13 +1582,6 @@ static int mxt_read_info_block(struct mxt_data *data)
 		mxt_free_object_table(data);
 		return error;
 	}
-
-	dev_info(&client->dev,
-			"Family ID: %u Variant ID: %u Firmware V%u.%u.%02X "
-			" Object Num:%d\n",
-			data->info->family_id, data->info->variant_id,
-			data->info->version >> 4, data->info->version & 0xf,
-			data->info->build, data->info->object_num);
 
 	return 0;
 
@@ -1600,11 +1601,6 @@ static int mxt_read_t9_resolution(struct mxt_data *data)
 	object = mxt_get_object(data, MXT_TOUCH_MULTI_T9);
 	if (!object)
 		return -EINVAL;
-
-	/* Update matrix size in info struct (may change after reset) */
-	error = mxt_read_info_block(data);
-	if (error)
-		return error;
 
 	error = __mxt_read_reg(client,
 			       object->start_address + MXT_T9_RANGE,
@@ -1636,10 +1632,8 @@ static int mxt_read_t9_resolution(struct mxt_data *data)
 		data->max_y = range.y;
 	}
 
-	dev_info(&client->dev,
-			"Matrix Size X%uY%u Touchscreen size X%uY%u\n",
-			data->info->matrix_xsize, data->info->matrix_ysize,
-			data->max_x, data->max_y);
+	dev_info(&client->dev, "Touchscreen size X%uY%u\n",
+		 data->max_x, data->max_y);
 
 	return 0;
 }
