@@ -431,6 +431,30 @@ static int mxt_lookup_bootloader_address(struct mxt_data *data)
 	return 0;
 }
 
+static int mxt_probe_bootloader(struct mxt_data *data)
+{
+	struct device *dev = &data->client->dev;
+	int ret;
+	u8 val;
+	bool crc_failure;
+
+	ret = mxt_lookup_bootloader_address(data);
+	if (ret)
+		return ret;
+
+	ret = mxt_bootloader_read(data, &val, 1);
+	if (ret)
+		return ret;
+
+	/* Check app crc fail mode */
+	crc_failure = (val & ~MXT_BOOT_STATUS_MASK) == MXT_APP_CRC_FAIL;
+
+	dev_err(dev, "Detected bootloader, status:%02X%s\n",
+		val, crc_failure ? ", APP_CRC_FAIL" : "");
+
+	return 0;
+}
+
 static u8 mxt_get_bootloader_version(struct mxt_data *data, u8 val)
 {
 	struct device *dev = &data->client->dev;
@@ -489,6 +513,7 @@ recheck:
 	switch (state) {
 	case MXT_WAITING_BOOTLOAD_CMD:
 	case MXT_WAITING_FRAME_DATA:
+	case MXT_APP_CRC_FAIL:
 		val &= ~MXT_BOOT_STATUS_MASK;
 		break;
 	case MXT_FRAME_CRC_PASS:
@@ -1247,8 +1272,11 @@ static int mxt_get_object_table(struct mxt_data *data)
 
 static void mxt_free_object_table(struct mxt_data *data)
 {
-	kfree(data->object_table);
-	data->object_table = NULL;
+	if (data->object_table) {
+		kfree(data->object_table);
+		data->object_table = NULL;
+	}
+
 	data->T6_reportid = 0;
 	data->T9_reportid_min = 0;
 	data->T9_reportid_max = 0;
@@ -1262,9 +1290,17 @@ static int mxt_initialize(struct mxt_data *data)
 	int error;
 	u8 val;
 
-	error = mxt_get_info(data);
-	if (error)
-		return error;
+        error = mxt_get_info(data);
+        if (error) {
+                error = mxt_probe_bootloader(data);
+
+                if (error) {
+                        return error;
+                } else {
+                        data->state = BOOTLOADER;
+                        return 0;
+                }
+        }
 
 	data->object_table = kcalloc(info->object_num,
 				     sizeof(struct mxt_object),
@@ -1434,12 +1470,15 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	if (ret)
 		goto out;
 
-	/* Change to the bootloader mode */
-	ret = mxt_soft_reset(data, MXT_BOOT_VALUE);
-	if (ret)
-		goto out;
+        if (data->state == APPMODE) {
+                /* Change to the bootloader mode */
+                ret = mxt_soft_reset(data, MXT_BOOT_VALUE);
+                if (ret)
+                        goto out;
 
-	data->state = BOOTLOADER;
+                data->state = BOOTLOADER;
+        }
+
 	INIT_COMPLETION(data->chg_completion);
 
         ret = mxt_check_bootloader(data, MXT_WAITING_BOOTLOAD_CMD);
@@ -1519,6 +1558,8 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	struct mxt_data *data = dev_get_drvdata(dev);
 	int error;
 
+	mxt_free_object_table(data);
+
 	error = mxt_load_fw(dev, MXT_FW_NAME);
 	if (error) {
 		dev_err(dev, "The firmware update failed(%d)\n", error);
@@ -1532,7 +1573,6 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 		}
 
 		dev_info(dev, "The firmware update succeeded\n");
-		mxt_free_object_table(data);
 
 		data->state = INIT;
 		mxt_initialize(data);
