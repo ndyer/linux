@@ -591,6 +591,10 @@ static void mxt_input_touchevent(struct mxt_data *data,
 	int area;
 	int pressure;
 
+	/* do not report events if input device not yet registered */
+	if (!input_dev)
+		return;
+
 	x = (message->message[1] << 4) | ((message->message[3] >> 4) & 0xf);
 	y = (message->message[2] << 4) | ((message->message[3] & 0xf));
 	if (data->max_x < 1024)
@@ -1232,9 +1236,17 @@ static int mxt_probe(struct i2c_client *client,
 
 	mxt_calc_resolution(data);
 
+	error = request_threaded_irq(client->irq, NULL, mxt_interrupt,
+				     pdata->irqflags | IRQF_ONESHOT,
+				     client->name, data);
+	if (error) {
+		dev_err(&client->dev, "Failed to register interrupt\n");
+		goto err_free_mem;
+	}
+
 	error = mxt_initialize(data);
 	if (error)
-		goto err_free_mem;
+		goto err_free_irq;
 
 	__set_bit(EV_ABS, input_dev->evbit);
 	__set_bit(EV_KEY, input_dev->evbit);
@@ -1284,21 +1296,13 @@ static int mxt_probe(struct i2c_client *client,
 	input_set_drvdata(input_dev, data);
 	i2c_set_clientdata(client, data);
 
-	error = request_threaded_irq(client->irq, NULL, mxt_interrupt,
-				     pdata->irqflags | IRQF_ONESHOT,
-				     client->name, data);
-	if (error) {
-		dev_err(&client->dev, "Failed to register interrupt\n");
-		goto err_free_object;
-	}
-
 	error = mxt_make_highchg(data);
 	if (error)
-		goto err_free_irq;
+		goto err_free_object;
 
 	error = input_register_device(input_dev);
 	if (error)
-		goto err_free_irq;
+		goto err_free_object;
 
 	error = sysfs_create_group(&client->dev.kobj, &mxt_attr_group);
 	if (error)
@@ -1309,10 +1313,10 @@ static int mxt_probe(struct i2c_client *client,
 err_unregister_device:
 	input_unregister_device(input_dev);
 	input_dev = NULL;
-err_free_irq:
-	free_irq(client->irq, data);
 err_free_object:
 	kfree(data->object_table);
+err_free_irq:
+	free_irq(client->irq, data);
 err_free_mem:
 	input_free_device(input_dev);
 	kfree(data);
