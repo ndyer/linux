@@ -26,7 +26,6 @@
 #include <linux/gpio.h>
 
 /* Configuration file */
-#define MXT_CFG_NAME		"maxtouch.cfg"
 #define MXT_CFG_MAGIC		"OBP_RAW V1"
 
 /* Registers */
@@ -268,6 +267,7 @@ struct mxt_data {
 	struct regulator *reg_vdd;
 	struct regulator *reg_avdd;
 	char *fw_name;
+	char *cfg_name;
 
 	/* Cached parameters from object table */
 	u16 T5_address;
@@ -1342,10 +1342,15 @@ static int mxt_check_reg_init(struct mxt_data *data)
 	u8 val;
 	u16 reg;
 
-	ret = request_firmware(&cfg, MXT_CFG_NAME, dev);
+	if (!data->cfg_name) {
+		dev_dbg(dev, "Skipping cfg download\n");
+		return 0;
+	}
+
+	ret = request_firmware(&cfg, data->cfg_name, dev);
 	if (ret < 0) {
 		dev_err(dev, "Failure to request config file %s\n",
-			MXT_CFG_NAME);
+			data->cfg_name);
 		return 0;
 	}
 
@@ -1612,6 +1617,14 @@ recheck:
 	}
 }
 
+static void mxt_free_input_device(struct mxt_data *data)
+{
+	if (data->input_dev) {
+		input_unregister_device(data->input_dev);
+		data->input_dev = NULL;
+	}
+}
+
 static void mxt_free_object_table(struct mxt_data *data)
 {
 	if (data->object_table) {
@@ -1624,10 +1637,7 @@ static void mxt_free_object_table(struct mxt_data *data)
 		data->msg_buf = NULL;
 	}
 
-	if (data->input_dev) {
-		input_unregister_device(data->input_dev);
-		data->input_dev = NULL;
-	}
+	mxt_free_input_device(data);
 
 	data->T5_address = 0;
 	data->T5_msg_size = 0;
@@ -2485,6 +2495,44 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	return count;
 }
 
+static ssize_t mxt_update_cfg_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct mxt_data *data = dev_get_drvdata(dev);
+	int error;
+
+	error = mxt_update_file_name(dev, &data->cfg_name, buf, count);
+	if (error)
+		return error;
+
+	mxt_free_input_device(data);
+
+	error = mxt_check_reg_init(data);
+	if (error) {
+		dev_err(dev, "The config update failed(%d)\n", error);
+		count = error;
+	}
+
+	error = mxt_check_retrigen(data);
+	if (error)
+		return error;
+
+	if (data->T9_reportid_min) {
+		error = mxt_initialize_t9_input_device(data);
+		if (error)
+			return error;
+	} else if (data->T100_reportid_min) {
+		error = mxt_initialize_t100_input_device(data);
+		if (error)
+			return error;
+	} else {
+		dev_warn(dev, "No touch object detected\n");
+	}
+
+	return count;
+}
+
 static ssize_t mxt_debug_enable_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
@@ -2574,6 +2622,7 @@ static DEVICE_ATTR(fw_version, S_IRUGO, mxt_fw_version_show, NULL);
 static DEVICE_ATTR(hw_version, S_IRUGO, mxt_hw_version_show, NULL);
 static DEVICE_ATTR(object, S_IRUGO, mxt_object_show, NULL);
 static DEVICE_ATTR(update_fw, S_IWUSR, NULL, mxt_update_fw_store);
+static DEVICE_ATTR(update_cfg, S_IWUSR, NULL, mxt_update_cfg_store);
 static DEVICE_ATTR(debug_enable, S_IWUSR | S_IRUSR, mxt_debug_enable_show,
 		   mxt_debug_enable_store);
 
@@ -2582,6 +2631,7 @@ static struct attribute *mxt_attrs[] = {
 	&dev_attr_hw_version.attr,
 	&dev_attr_object.attr,
 	&dev_attr_update_fw.attr,
+	&dev_attr_update_cfg.attr,
 	&dev_attr_debug_enable.attr,
 	NULL
 };
@@ -2671,6 +2721,12 @@ static void mxt_handle_pdata(struct mxt_data *data)
 	} else {
 		data->irqflags = pdata->irqflags | IRQF_ONESHOT;
 		data->gpio_reset = pdata->gpio_reset;
+
+		if (pdata->cfg_name)
+			mxt_update_file_name(&data->client->dev,
+					     &data->cfg_name,
+					     pdata->cfg_name,
+					     strlen(pdata->cfg_name));
 
 		data->t15_num_keys = pdata->t15_num_keys;
 		for (key = 0; key < data->t15_num_keys; key++)

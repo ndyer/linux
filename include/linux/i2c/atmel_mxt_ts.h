@@ -21,6 +21,7 @@ struct mxt_platform_data {
 	int *t15_keys;
 	int t15_num_keys;
 	unsigned long gpio_reset;
+	const char *cfg_name;
 };
 
 #endif /* __LINUX_ATMEL_MXT_TS_H */
