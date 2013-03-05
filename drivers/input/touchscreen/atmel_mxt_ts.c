@@ -30,7 +30,6 @@
 #include <linux/gpio.h>
 
 /* Configuration file */
-#define MXT_CFG_NAME		"maxtouch.cfg"
 #define MXT_CFG_MAGIC		"OBP_RAW V1"
 
 /* Registers */
@@ -248,6 +247,7 @@ struct mxt_data {
 	struct regulator *reg_vdd;
 	struct regulator *reg_avdd;
 	char *fw_name;
+	char *cfg_name;
 
 	/* Cached parameters from object table */
 	u16 T5_address;
@@ -281,6 +281,9 @@ struct mxt_data {
 
 	/* Indicates whether device is in suspend */
 	bool suspended;
+
+	/* Indicates whether device is updating configuration */
+	bool updating_config;
 };
 
 static size_t mxt_obj_size(const struct mxt_object *obj)
@@ -1640,10 +1643,17 @@ static int mxt_acquire_irq(struct mxt_data *data)
 	return 0;
 }
 
+static void mxt_free_input_device(struct mxt_data *data)
+{
+	if (data->input_dev) {
+		input_unregister_device(data->input_dev);
+		data->input_dev = NULL;
+	}
+}
+
 static void mxt_free_object_table(struct mxt_data *data)
 {
-	input_unregister_device(data->input_dev);
-	data->input_dev = NULL;
+	mxt_free_input_device(data);
 
 	data->object_table = NULL;
 	data->info = NULL;
@@ -1651,11 +1661,6 @@ static void mxt_free_object_table(struct mxt_data *data)
 	data->raw_info_block = NULL;
 	kfree(data->msg_buf);
 	data->msg_buf = NULL;
-
-	if (data->input_dev) {
-		input_unregister_device(data->input_dev);
-		data->input_dev = NULL;
-	}
 
 	data->T5_address = 0;
 	data->T5_msg_size = 0;
@@ -2345,9 +2350,15 @@ retry_bootloader:
 	if (error)
 		goto err_free_object_table;
 
-	request_firmware_nowait(THIS_MODULE, true, MXT_CFG_NAME,
-				&data->client->dev, GFP_KERNEL, data,
-				mxt_config_cb);
+	if (data->cfg_name) {
+		request_firmware_nowait(THIS_MODULE, true, data->cfg_name,
+					&data->client->dev, GFP_KERNEL, data,
+					mxt_config_cb);
+	} else {
+		error = mxt_configure_objects(data, NULL);
+		if (error)
+			goto err_free_object_table;
+	}
 
 	return 0;
 
@@ -2365,7 +2376,7 @@ static int mxt_configure_objects(struct mxt_data *data,
 	error = mxt_init_t7_power_cfg(data);
 	if (error) {
 		dev_err(dev, "Failed to initialize power cfg\n");
-		return error;
+		goto err_free_object_table;
 	}
 
 	if (cfg) {
@@ -2377,16 +2388,20 @@ static int mxt_configure_objects(struct mxt_data *data,
 	if (data->T9_reportid_min) {
 		error = mxt_initialize_t9_input_device(data);
 		if (error)
-			return error;
+			goto err_free_object_table;
 	} else if (data->T100_reportid_min) {
 		error = mxt_initialize_t100_input_device(data);
 		if (error)
-			return error;
+			goto err_free_object_table;
 	} else {
 		dev_warn(dev, "No touch object detected\n");
 	}
 
 	return 0;
+
+err_free_object_table:
+	mxt_free_object_table(data);
+	return error;
 }
 
 /* Firmware Version is returned as Major.Minor.Build */
@@ -2676,16 +2691,69 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	return count;
 }
 
+static ssize_t mxt_update_cfg_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct mxt_data *data = dev_get_drvdata(dev);
+	const struct firmware *cfg;
+	int ret;
+
+	if (data->in_bootloader) {
+		dev_err(dev, "Not in appmode\n");
+		return -EINVAL;
+	}
+
+	ret = mxt_update_file_name(dev, &data->cfg_name, buf, count);
+	if (ret)
+		return ret;
+
+	ret = request_firmware(&cfg, data->cfg_name, dev);
+	if (ret < 0) {
+		dev_err(dev, "Failure to request config file %s\n",
+			data->cfg_name);
+		ret = -ENOENT;
+		goto out;
+	}
+
+	data->updating_config = true;
+
+	mxt_free_input_device(data);
+
+	if (data->suspended) {
+		if (data->use_regulator) {
+			enable_irq(data->irq);
+			mxt_regulator_enable(data);
+		} else {
+			mxt_set_t7_power_cfg(data, MXT_POWER_CFG_RUN);
+			mxt_acquire_irq(data);
+		}
+
+		data->suspended = false;
+	}
+
+	ret = mxt_configure_objects(data, cfg);
+	if (ret)
+		goto out;
+
+	ret = count;
+out:
+	data->updating_config = false;
+	return ret;
+}
+
 static DEVICE_ATTR(fw_version, S_IRUGO, mxt_fw_version_show, NULL);
 static DEVICE_ATTR(hw_version, S_IRUGO, mxt_hw_version_show, NULL);
 static DEVICE_ATTR(object, S_IRUGO, mxt_object_show, NULL);
 static DEVICE_ATTR(update_fw, S_IWUSR, NULL, mxt_update_fw_store);
+static DEVICE_ATTR(update_cfg, S_IWUSR, NULL, mxt_update_cfg_store);
 
 static struct attribute *mxt_attrs[] = {
 	&dev_attr_fw_version.attr,
 	&dev_attr_hw_version.attr,
 	&dev_attr_object.attr,
 	&dev_attr_update_fw.attr,
+	&dev_attr_update_cfg.attr,
 	NULL
 };
 
@@ -2741,7 +2809,7 @@ static void mxt_start(struct mxt_data *data)
 
 static void mxt_stop(struct mxt_data *data)
 {
-	if (data->suspended || data->in_bootloader)
+	if (data->suspended || data->in_bootloader || data->updating_config)
 		return;
 
 	disable_irq(data->irq);
@@ -2844,6 +2912,12 @@ static int mxt_probe(struct i2c_client *client,
 		/* Set default parameters */
 		data->pdata->irqflags = IRQF_TRIGGER_FALLING;
 	}
+
+	if (data->pdata->cfg_name)
+		mxt_update_file_name(&data->client->dev,
+				     &data->cfg_name,
+				     data->pdata->cfg_name,
+				     strlen(data->pdata->cfg_name));
 
 	init_completion(&data->bl_completion);
 	init_completion(&data->reset_completion);
