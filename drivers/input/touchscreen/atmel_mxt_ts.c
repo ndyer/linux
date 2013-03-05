@@ -25,8 +25,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/gpio.h>
 
-/* Firmware files */
-#define MXT_FW_NAME		"maxtouch.fw"
+/* Configuration file */
 #define MXT_CFG_NAME		"maxtouch.cfg"
 #define MXT_CFG_MAGIC		"OBP_RAW V1"
 
@@ -268,6 +267,7 @@ struct mxt_data {
 	unsigned long gpio_reset;
 	struct regulator *reg_vdd;
 	struct regulator *reg_avdd;
+	char *fw_name;
 
 	/* Cached parameters from object table */
 	u16 T5_address;
@@ -2311,7 +2311,7 @@ static int mxt_check_firmware_format(struct device *dev,
 	return -1;
 }
 
-static int mxt_load_fw(struct device *dev, const char *fn)
+static int mxt_load_fw(struct device *dev)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
 	const struct firmware *fw = NULL;
@@ -2321,9 +2321,9 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	unsigned int frame = 0;
 	int ret;
 
-	ret = request_firmware(&fw, fn, dev);
+	ret = request_firmware(&fw, data->fw_name, dev);
 	if (ret) {
-		dev_err(dev, "Unable to open firmware %s\n", fn);
+		dev_err(dev, "Unable to open firmware %s\n", data->fw_name);
 		return ret;
 	}
 
@@ -2420,6 +2420,35 @@ out:
 	return ret;
 }
 
+static int mxt_update_file_name(struct device *dev, char** file_name,
+                                const char *buf, size_t count)
+{
+        char *file_name_tmp;
+
+        /* Simple sanity check */
+        if (count > 64) {
+                dev_warn(dev, "File name too long\n");
+                return -EINVAL;
+        }
+
+        file_name_tmp = krealloc(*file_name, count + 1, GFP_KERNEL);
+        if (!file_name_tmp) {
+                dev_warn(dev, "no memory\n");
+                return -ENOMEM;
+        }
+
+        *file_name = file_name_tmp;
+        memcpy(*file_name, buf, count);
+
+        /* Echo into the sysfs entry may append newline at the end of buf */
+        if (buf[count - 1] == '\n')
+                (*file_name)[count - 1] = '\0';
+        else
+                (*file_name)[count] = '\0';
+
+        return 0;
+}
+
 static ssize_t mxt_update_fw_store(struct device *dev,
 					struct device_attribute *attr,
 					const char *buf, size_t count)
@@ -2427,9 +2456,13 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	struct mxt_data *data = dev_get_drvdata(dev);
 	int error;
 
+	error = mxt_update_file_name(dev, &data->fw_name, buf, count);
+	if (error)
+		return error;
+
 	mxt_free_object_table(data);
 
-	error = mxt_load_fw(dev, MXT_FW_NAME);
+	error = mxt_load_fw(dev);
 	if (error) {
 		dev_err(dev, "The firmware update failed(%d)\n", error);
 		count = error;
