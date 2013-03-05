@@ -1621,7 +1621,9 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 		dev_info(dev, "The firmware update succeeded\n");
 
 		data->state = INIT;
-		mxt_initialize(data);
+		error = mxt_initialize(data);
+		if (error)
+			return error;
 	}
 
 	return count;
