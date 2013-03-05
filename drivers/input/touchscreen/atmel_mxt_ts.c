@@ -252,6 +252,14 @@ struct mxt_message {
 	u8 message[7];
 };
 
+enum mxt_device_state {
+	INIT,
+	APPMODE,
+	BOOTLOADER,
+	FAILED,
+	RESET,
+};
+
 /* Each client has this additional data */
 struct mxt_data {
 	struct i2c_client *client;
@@ -265,7 +273,7 @@ struct mxt_data {
 	unsigned int irq;
 	unsigned int max_x;
 	unsigned int max_y;
-	bool in_bootloader_or_reset;
+	enum mxt_device_state state;
 	u16 mem_size;
 	struct bin_attribute mem_access_attr;
 	bool debug_enabled;
@@ -761,13 +769,19 @@ static irqreturn_t mxt_interrupt(int irq, void *dev_id)
 {
 	struct mxt_data *data = dev_id;
 
-	if (data->in_bootloader_or_reset) {
-		/* bootloader state transition completion */
-		complete(&data->chg_completion);
-		return IRQ_HANDLED;
-	}
+	switch (data->state) {
+		case BOOTLOADER:
+		case RESET:
+			/* bootloader state transition completion */
+			complete(&data->chg_completion);
+			return IRQ_HANDLED;
 
-	return mxt_process_messages_until_invalid(data);
+		case APPMODE:
+			return mxt_process_messages_until_invalid(data);
+
+		default:
+			return IRQ_NONE;
+	}
 }
 
 static int mxt_t6_command(struct mxt_data *data, u16 cmd_offset,
@@ -809,7 +823,7 @@ static int mxt_soft_reset(struct mxt_data *data, u8 value)
 
 	dev_info(dev, "Resetting chip\n");
 
-	data->in_bootloader_or_reset = true;
+	data->state = RESET;
 	INIT_COMPLETION(data->chg_completion);
 
 	ret = mxt_t6_command(data, MXT_COMMAND_RESET, value, false);
@@ -826,7 +840,7 @@ static int mxt_soft_reset(struct mxt_data *data, u8 value)
 	}
 
 out:
-	data->in_bootloader_or_reset = false;
+	data->state = (value == MXT_RESET_VALUE) ? APPMODE : BOOTLOADER;
 	return ret;
 }
 
@@ -1260,6 +1274,8 @@ static int mxt_initialize(struct mxt_data *data)
 		return -ENOMEM;
 	}
 
+        data->state = APPMODE;
+
 	/* Get object table information */
 	error = mxt_get_object_table(data);
 	if (error) {
@@ -1299,6 +1315,7 @@ static int mxt_initialize(struct mxt_data *data)
 	return 0;
 
 err_free_object_table:
+        data->state = FAILED;
 	mxt_free_object_table(data);
 	return error;
 }
@@ -1422,7 +1439,7 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	if (ret)
 		goto out;
 
-	data->in_bootloader_or_reset = true;
+	data->state = BOOTLOADER;
 	INIT_COMPLETION(data->chg_completion);
 
         ret = mxt_check_bootloader(data, MXT_WAITING_BOOTLOAD_CMD);
@@ -1430,21 +1447,27 @@ static int mxt_load_fw(struct device *dev, const char *fn)
                 /* Bootloader may still be unlocked from previous update
                  * attempt */
                 ret = mxt_check_bootloader(data, MXT_WAITING_FRAME_DATA);
-                if (ret)
+                if (ret) {
+			data->state = FAILED;
                         goto out;
+		}
         } else {
                 dev_info(dev, "Unlocking bootloader\n");
 
                 /* Unlock bootloader */
                 ret = mxt_unlock_bootloader(data);
-                if (ret)
+                if (ret) {
+			data->state = FAILED;
                         goto out;
+		}
         }
 
 	while (pos < fw->size) {
 		ret = mxt_check_bootloader(data, MXT_WAITING_FRAME_DATA);
-		if (ret)
+		if (ret) {
+			data->state = FAILED;
 			goto out;
+		}
 
 		frame_size = ((*(fw->data + pos) << 8) | *(fw->data + pos + 1));
 
@@ -1453,8 +1476,10 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 
 		/* Write one frame to device */
 		ret = mxt_bootloader_write(data, fw->data + pos, frame_size);
-		if (ret)
+		if (ret) {
+			data->state = FAILED;
 			goto out;
+		}
 
 		ret = mxt_check_bootloader(data, MXT_FRAME_CRC_PASS);
                 if (ret) {
@@ -1465,6 +1490,7 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 
                         if (retry > 20) {
 				dev_err(dev, "Retry count exceeded\n");
+				data->state = FAILED;
                                 goto out;
                         }
                 } else {
@@ -1483,7 +1509,6 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 
 out:
 	release_firmware(fw);
-	data->in_bootloader_or_reset = false;
 	return ret;
 }
 
@@ -1502,12 +1527,14 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 		error = mxt_wait_for_chg(data, MXT_FWRESET_TIME);
 		if (error) {
 			dev_err(dev, "No response!\n");
+			data->state = FAILED;
 			return error;
 		}
 
 		dev_info(dev, "The firmware update succeeded\n");
 		mxt_free_object_table(data);
 
+		data->state = INIT;
 		mxt_initialize(data);
 	}
 
@@ -1547,6 +1574,11 @@ static ssize_t mxt_debug_enable_store(struct device *dev,
 static int mxt_check_mem_access_params(struct mxt_data *data, loff_t off,
 				       size_t *count)
 {
+	if (data->state != APPMODE) {
+		dev_err(&data->client->dev, "Not in APPMODE\n");
+		return -EINVAL;
+	}
+
 	if (off >= data->mem_size)
 		return -EIO;
 
@@ -1664,6 +1696,8 @@ static int mxt_probe(struct i2c_client *client,
 		goto err_free_mem;
 	}
 
+	data->state = INIT;
+
 	data->is_tp = !strcmp(id->name, "atmel_mxt_tp");
 
 	input_dev->name = (data->is_tp) ? "Atmel maXTouch Touchpad" :
@@ -1747,10 +1781,13 @@ static int mxt_probe(struct i2c_client *client,
 	input_set_drvdata(input_dev, data);
 	i2c_set_clientdata(client, data);
 
-	error = mxt_make_highchg(data);
-	if (error) {
-		dev_err(&client->dev, "Error %d clearing messages\n", error);
-		goto err_free_object;
+	if (data->state == APPMODE) {
+		error = mxt_make_highchg(data);
+		if (error) {
+			dev_err(&client->dev,
+				"Error %d clearing messages\n", error);
+			goto err_free_object;
+		}
 	}
 
 	error = input_register_device(input_dev);
