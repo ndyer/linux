@@ -42,7 +42,6 @@
 #include <dt-bindings/input/atmel_mxt_ts.h>
 
 /* Configuration file */
-#define MXT_CFG_NAME		"maxtouch.cfg"
 #define MXT_CFG_MAGIC		"OBP_RAW V1"
 
 /* Registers */
@@ -350,7 +349,8 @@ struct mxt_data {
 	u8 stylus_aux_peak;
 	struct regulator *reg_vdd;
 	struct regulator *reg_avdd;
-	char *fw_name;
+	const char *fw_name;
+	const char *cfg_name;
 
 	/* Cached parameters from object table */
 	u16 T5_address;
@@ -396,6 +396,9 @@ struct mxt_data {
 
 	/* Indicates whether device is in suspend */
 	bool suspended;
+
+	/* Indicates whether device is updating configuration */
+	bool updating_config;
 };
 
 struct mxt_vb2_buffer {
@@ -2585,13 +2588,19 @@ static int mxt_initialize(struct mxt_data *data)
 	if (error)
 		return error;
 
-	error = request_firmware_nowait(THIS_MODULE, true, MXT_CFG_NAME,
-					&client->dev, GFP_KERNEL, data,
-					mxt_config_cb);
-	if (error) {
-		dev_err(&client->dev, "Failed to invoke firmware loader: %d\n",
-			error);
-		return error;
+	if (data->cfg_name) {
+		error = request_firmware_nowait(THIS_MODULE, true,
+					data->cfg_name, &data->client->dev,
+					GFP_KERNEL, data, mxt_config_cb);
+		if (error) {
+			dev_err(&client->dev, "Failed to invoke firmware loader: %d\n",
+				error);
+			return error;
+		}
+	} else {
+		error = mxt_configure_objects(data, NULL);
+		if (error)
+			return error;
 	}
 
 	return 0;
@@ -3074,7 +3083,7 @@ static int mxt_configure_objects(struct mxt_data *data,
 	error = mxt_init_t7_power_cfg(data);
 	if (error) {
 		dev_err(dev, "Failed to initialize power cfg\n");
-		return error;
+		goto err_free_object_table;
 	}
 
 	if (cfg) {
@@ -3086,7 +3095,7 @@ static int mxt_configure_objects(struct mxt_data *data,
 	if (data->multitouch) {
 		error = mxt_initialize_input_device(data);
 		if (error)
-			return error;
+			goto err_free_object_table;
 	} else {
 		dev_warn(dev, "No touch object detected\n");
 	}
@@ -3094,6 +3103,10 @@ static int mxt_configure_objects(struct mxt_data *data,
 	mxt_debug_init(data);
 
 	return 0;
+
+err_free_object_table:
+	mxt_free_object_table(data);
+	return error;
 }
 
 /* Firmware Version is returned as Major.Minor.Build */
@@ -3332,7 +3345,7 @@ release_firmware:
 	return ret;
 }
 
-static int mxt_update_file_name(struct device *dev, char **file_name,
+static int mxt_update_file_name(struct device *dev, const char **file_name,
 				const char *buf, size_t count)
 {
 	char *file_name_tmp;
@@ -3347,15 +3360,15 @@ static int mxt_update_file_name(struct device *dev, char **file_name,
 	if (!file_name_tmp)
 		return -ENOMEM;
 
-	*file_name = file_name_tmp;
-	memcpy(*file_name, buf, count);
+	memcpy(file_name_tmp, buf, count);
 
 	/* Echo into the sysfs entry may append newline at the end of buf */
 	if (buf[count - 1] == '\n')
-		(*file_name)[count - 1] = '\0';
+		file_name_tmp[count - 1] = '\0';
 	else
-		(*file_name)[count] = '\0';
+		file_name_tmp[count] = '\0';
 
+	*file_name = file_name_tmp;
 	return 0;
 }
 
@@ -3387,6 +3400,55 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	return count;
 }
 
+static ssize_t mxt_update_cfg_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct mxt_data *data = dev_get_drvdata(dev);
+	const struct firmware *cfg;
+	int ret;
+
+	ret = mxt_update_file_name(dev, &data->cfg_name, buf, count);
+	if (ret)
+		return ret;
+
+	ret = request_firmware(&cfg, data->cfg_name, dev);
+	if (ret < 0) {
+		dev_err(dev, "Failure to request config file %s\n",
+			data->cfg_name);
+		ret = -ENOENT;
+		goto out;
+	}
+
+	data->updating_config = true;
+
+	mxt_free_input_device(data);
+
+	if (data->suspended) {
+		if (data->suspend_mode == MXT_SUSPEND_REGULATOR) {
+			enable_irq(data->irq);
+			mxt_regulator_enable(data);
+		} else if (data->suspend_mode == MXT_SUSPEND_DEEP_SLEEP) {
+			mxt_set_t7_power_cfg(data, MXT_POWER_CFG_RUN);
+			mxt_acquire_irq(data);
+		}
+
+		data->suspended = false;
+	}
+
+	ret = mxt_configure_objects(data, cfg);
+	if (ret)
+		goto release;
+
+	ret = count;
+
+release:
+	release_firmware(cfg);
+out:
+	data->updating_config = false;
+	return ret;
+}
+
 static DEVICE_ATTR(update_fw, S_IWUSR, NULL, mxt_update_fw_store);
 
 static struct attribute *mxt_fw_attrs[] = {
@@ -3401,11 +3463,13 @@ static const struct attribute_group mxt_fw_attr_group = {
 static DEVICE_ATTR(fw_version, S_IRUGO, mxt_fw_version_show, NULL);
 static DEVICE_ATTR(hw_version, S_IRUGO, mxt_hw_version_show, NULL);
 static DEVICE_ATTR(object, S_IRUGO, mxt_object_show, NULL);
+static DEVICE_ATTR(update_cfg, S_IWUSR, NULL, mxt_update_cfg_store);
 
 static struct attribute *mxt_attrs[] = {
 	&dev_attr_fw_version.attr,
 	&dev_attr_hw_version.attr,
 	&dev_attr_object.attr,
+	&dev_attr_update_cfg.attr,
 	NULL
 };
 
@@ -3506,7 +3570,7 @@ static int mxt_stop(struct mxt_data *data)
 {
 	int ret;
 
-	if (data->suspended || data->in_bootloader)
+	if (data->suspended || data->in_bootloader || data->updating_config)
 		return 0;
 
 	switch (data->suspend_mode) {
@@ -3599,6 +3663,8 @@ static int mxt_parse_device_properties(struct mxt_data *data)
 		data->t19_keymap = keymap;
 		data->t19_num_keys = n_keys;
 	}
+
+	device_property_read_string(dev, "atmel,cfg_name", &data->cfg_name);
 
 	return 0;
 }

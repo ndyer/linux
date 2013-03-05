@@ -37,6 +37,14 @@ Optional properties for main touchpad device:
     MXT_SUSPEND_REGULATOR - use regulators to power down device during suspend
     Definitions are in <dt-bindings/input/atmel_mxt_ts.h>.
 
+<<<<<<< HEAD
+=======
+- atmel,reset-gpio: Configure RESET GPIO. Required for regulator support.
+
+- atmel,cfg_name: Provide name of configuration file in OBP_RAW format. This
+    will be downloaded from the firmware loader on probe to the device.
+
+>>>>>>> 71a2a4d19544... Input: atmel_mxt_ts - handle cfg filename via pdata/sysfs
 Example:
 
 	touch@4b {
