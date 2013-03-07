@@ -1406,6 +1406,13 @@ M:	Nicolas Ferre <nicolas.ferre@atmel.com>
 S:	Supported
 F:	drivers/net/ethernet/cadence/
 
+ATMEL MAXTOUCH TOUCHSCREEN DRIVER
+M:	Nick Dyer <nick.dyer@itdev.co.uk>
+S:	Supported
+W:	http://github.com/atmel-maxtouch
+F:	drivers/input/touchscreen/atmel_mxt_ts.c
+F:	include/linux/i2c/atmel_mxt_ts.h
+
 ATMEL SPI DRIVER
 M:	Nicolas Ferre <nicolas.ferre@atmel.com>
 S:	Supported
