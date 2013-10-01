@@ -44,7 +44,12 @@ Optional properties for main touchpad device:
 - atmel,cfg_name: Provide name of configuration file in OBP_RAW format. This
     will be downloaded from the firmware loader on probe to the device.
 
+<<<<<<< HEAD
 >>>>>>> 71a2a4d19544... Input: atmel_mxt_ts - handle cfg filename via pdata/sysfs
+=======
+- atmel,input_name: Override name of input device from the default.
+
+>>>>>>> cbf94a7bda75... Input: atmel_mxt_ts - allow input name to be specified in platform data
 Example:
 
 	touch@4b {

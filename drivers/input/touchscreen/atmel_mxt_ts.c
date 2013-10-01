@@ -351,6 +351,7 @@ struct mxt_data {
 	struct regulator *reg_avdd;
 	const char *fw_name;
 	const char *cfg_name;
+	const char *input_name;
 
 	/* Cached parameters from object table */
 	u16 T5_address;
@@ -2417,7 +2418,11 @@ static int mxt_initialize_input_device(struct mxt_data *data)
 	if (!input_dev)
 		return -ENOMEM;
 
-	input_dev->name = "Atmel maXTouch Touchscreen";
+	if (data->input_name)
+		input_dev->name = data->input_name;
+	else
+		input_dev->name = "Atmel maXTouch Touchscreen";
+
 	input_dev->phys = data->phys;
 	input_dev->id.bustype = BUS_I2C;
 	input_dev->dev.parent = dev;
@@ -3665,6 +3670,8 @@ static int mxt_parse_device_properties(struct mxt_data *data)
 	}
 
 	device_property_read_string(dev, "atmel,cfg_name", &data->cfg_name);
+
+	device_property_read_string(dev, "atmel,input_name", &data->input_name);
 
 	return 0;
 }
