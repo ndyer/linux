@@ -2301,7 +2301,11 @@ static int mxt_initialize_input_device(struct mxt_data *data)
 		return -ENOMEM;
 	}
 
-	input_dev->name = "Atmel maXTouch Touchscreen";
+	if (data->pdata->input_name)
+		input_dev->name = data->pdata->input_name;
+	else
+		input_dev->name = "Atmel maXTouch Touchscreen";
+
 	input_dev->phys = data->phys;
 	input_dev->id.bustype = BUS_I2C;
 	input_dev->dev.parent = dev;
@@ -3080,6 +3084,9 @@ static const struct mxt_platform_data *mxt_parse_dt(struct i2c_client *client)
 
 	of_property_read_string(client->dev.of_node, "atmel,cfg_name",
 				&pdata->cfg_name);
+
+	of_property_read_string(client->dev.of_node, "atmel,input_name",
+				&pdata->input_name);
 
 	if (of_find_property(client->dev.of_node, "linux,gpio-keymap",
 			     &proplen)) {
