@@ -22,6 +22,7 @@
 #include <linux/i2c/atmel_mxt_ts.h>
 #include <linux/input/mt.h>
 #include <linux/interrupt.h>
+#include <linux/of.h>
 #include <linux/slab.h>
 
 /* Version */
@@ -1527,6 +1528,42 @@ static void mxt_input_close(struct input_dev *dev)
 	mxt_stop(data);
 }
 
+#ifdef CONFIG_OF
+static struct mxt_platform_data *mxt_parse_dt(struct i2c_client *client)
+{
+	struct mxt_platform_data *pdata;
+	struct property *prop;
+	unsigned int *keymap;
+	int proplen, i, ret;
+	u32 keycode;
+
+	pdata = devm_kzalloc(&client->dev, sizeof(*pdata), GFP_KERNEL);
+	if (!pdata)
+		return NULL;
+
+	prop = of_find_property(client->dev.of_node, "linux,gpio-keymap",
+				&proplen);
+	if (prop) {
+		pdata->t19_num_keys = proplen / sizeof(u32);
+
+		keymap = devm_kzalloc(&client->dev,
+			pdata->t19_num_keys * sizeof(u32), GFP_KERNEL);
+		if (!keymap)
+			return NULL;
+		pdata->t19_keymap = keymap;
+		for (i = 0; i < pdata->t19_num_keys; i++) {
+			ret = of_property_read_u32_index(client->dev.of_node,
+					"linux,gpio-keymap", i, &keycode);
+			if (ret)
+				keycode = 0;
+			keymap[i] = keycode;
+		}
+	}
+
+	return pdata;
+}
+#endif
+
 static int mxt_probe(struct i2c_client *client,
 		const struct i2c_device_id *id)
 {
@@ -1534,6 +1571,10 @@ static int mxt_probe(struct i2c_client *client,
 	const struct mxt_platform_data *pdata = dev_get_platdata(&client->dev);
 	int error;
 
+#ifdef CONFIG_OF
+	if (!pdata && client->dev.of_node)
+		pdata = mxt_parse_dt(client);
+#endif
 	if (!pdata)
 		return -EINVAL;
 
@@ -1638,6 +1679,12 @@ static int mxt_resume(struct device *dev)
 
 static SIMPLE_DEV_PM_OPS(mxt_pm_ops, mxt_suspend, mxt_resume);
 
+static const struct of_device_id mxt_of_match[] = {
+	{ .compatible = "atmel,maxtouch", },
+	{},
+};
+MODULE_DEVICE_TABLE(of, mxt_of_match);
+
 static const struct i2c_device_id mxt_id[] = {
 	{ "qt602240_ts", 0 },
 	{ "atmel_mxt_ts", 0 },
@@ -1651,6 +1698,7 @@ static struct i2c_driver mxt_driver = {
 	.driver = {
 		.name	= "atmel_mxt_ts",
 		.owner	= THIS_MODULE,
+		.of_match_table = of_match_ptr(mxt_of_match),
 		.pm	= &mxt_pm_ops,
 	},
 	.probe		= mxt_probe,
