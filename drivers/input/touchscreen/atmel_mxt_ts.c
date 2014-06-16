@@ -2109,7 +2109,7 @@ static void mxt_probe_regulators(struct mxt_data *data)
 	 * must be kept low until some time after regulators come up to
 	 * voltage
 	 */
-	if (!data->pdata->gpio_reset) {
+	if (!gpio_is_valid(data->pdata->gpio_reset)) {
 		dev_dbg(dev, "Must have reset GPIO to use regulator support\n");
 		goto fail;
 	}
@@ -3140,6 +3140,10 @@ static struct mxt_platform_data *mxt_parse_dt(struct i2c_client *client)
 	pdata = devm_kzalloc(&client->dev, sizeof(*pdata), GFP_KERNEL);
 	if (!pdata)
 		return NULL;
+
+	/* reset gpio */
+	pdata->gpio_reset = of_get_named_gpio_flags(client->dev.of_node,
+		"atmel,reset-gpio", 0, NULL);
 
 	prop = of_find_property(client->dev.of_node, "linux,gpio-keymap",
 				&proplen);
