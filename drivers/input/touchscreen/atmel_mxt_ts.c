@@ -3071,8 +3071,7 @@ static const struct mxt_platform_data *mxt_parse_dt(struct i2c_client *client)
 {
 	struct mxt_platform_data *pdata;
 	u32 *keymap;
-	u32 keycode;
-	int proplen, i, ret;
+	int proplen, ret;
 
 	if (!client->dev.of_node)
 		return ERR_PTR(-ENOENT);
@@ -3100,13 +3099,13 @@ static const struct mxt_platform_data *mxt_parse_dt(struct i2c_client *client)
 		if (!keymap)
 			return ERR_PTR(-ENOMEM);
 
-		for (i = 0; i < pdata->t19_num_keys; i++) {
-			ret = of_property_read_u32_index(client->dev.of_node,
-					"linux,gpio-keymap", i, &keycode);
-			if (ret)
-				keycode = KEY_RESERVED;
-
-			keymap[i] = keycode;
+		ret = of_property_read_u32_array(client->dev.of_node,
+			"linux,gpio-keymap", keymap, pdata->t19_num_keys);
+		if (ret) {
+			dev_err(&client->dev,
+				"Unable to read device tree key codes: %d\n",
+				 ret);
+			return NULL;
 		}
 
 		pdata->t19_keymap = keymap;
