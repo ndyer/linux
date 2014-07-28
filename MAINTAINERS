@@ -1920,6 +1920,8 @@ M:	Nick Dyer <nick.dyer@itdev.co.uk>
 T:	git git://github.com/atmel-maxtouch/linux.git
 S:	Supported
 F:	drivers/input/touchscreen/atmel_mxt_ts.c
+F:	include/dt-bindings/input/atmel_mxt_ts.h
+F:	include/linux/platform_data/atmel_mxt_ts.h
 
 ATTO EXPRESSSAS SAS/SATA RAID SCSI DRIVER
 M:	Bradley Grove <linuxdrivers@attotech.com>
