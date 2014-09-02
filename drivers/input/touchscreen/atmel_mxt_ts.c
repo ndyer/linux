@@ -855,6 +855,9 @@ static void mxt_input_button(struct mxt_data *data, u8 *message)
 
 static void mxt_input_sync(struct mxt_data *data)
 {
+	if (!data->input_dev)
+		return;
+
 	input_mt_report_pointer_emulation(data->input_dev,
 					  data->t19_num_keys);
 	input_sync(data->input_dev);
