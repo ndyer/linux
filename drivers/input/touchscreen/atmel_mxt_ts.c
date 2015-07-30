@@ -937,9 +937,6 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 			hover = true;
 			active = true;
 
-			if (data->t100_aux_vect)
-				orientation = message[data->t100_aux_vect];
-
 			break;
 
 		case MXT_T100_TYPE_FINGER:
