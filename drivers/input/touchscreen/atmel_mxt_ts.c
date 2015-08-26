@@ -137,6 +137,10 @@ struct t9_range {
 #define MXT_DIAGNOSTIC_DELTAS	0x10
 #define MXT_DIAGNOSTIC_SIZE	128
 
+#define MXT_FAMILY_1386			160
+#define MXT1386_COLUMNS			3
+#define MXT1386_PAGES_PER_COLUMN	8
+
 struct t37_debug {
 	u8 mode;
 	u8 page;
@@ -2135,12 +2139,26 @@ recheck:
 static u16 mxt_get_debug_value(struct mxt_data *data, unsigned int x,
 			       unsigned int y)
 {
+	struct mxt_info *info = &data->info;
 	struct mxt_dbg *dbg = &data->dbg;
 	unsigned int ofs, page;
+	unsigned int col = 0;
+	unsigned int col_width;
 
-	ofs = (y + (x * data->info.matrix_ysize)) * sizeof(u16);
+	if (info->family_id == MXT_FAMILY_1386) {
+		col_width = info->matrix_ysize / MXT1386_COLUMNS;
+		col = y / col_width;
+		y = y % col_width;
+	} else {
+		col_width = info->matrix_ysize;
+	}
+
+	ofs = (y + (x * col_width)) * sizeof(u16);
 	page = ofs / MXT_DIAGNOSTIC_SIZE;
 	ofs %= MXT_DIAGNOSTIC_SIZE;
+
+	if (info->family_id == MXT_FAMILY_1386)
+		page += col * MXT1386_PAGES_PER_COLUMN;
 
 	return get_unaligned_le16(&dbg->t37_buf[page].data[ofs]);
 }
@@ -2411,6 +2429,7 @@ static const struct video_device mxt_video_device = {
 
 static void mxt_debug_init(struct mxt_data *data)
 {
+	struct mxt_info *info = &data->info;
 	struct mxt_dbg *dbg = &data->dbg;
 	struct mxt_object *object;
 	int error;
@@ -2434,9 +2453,13 @@ static void mxt_debug_init(struct mxt_data *data)
 
 	/* Calculate size of data and allocate buffer */
 	dbg->t37_nodes = data->xsize * data->ysize;
-	dbg->t37_pages = ((data->xsize * data->info.matrix_ysize)
-			  * sizeof(u16) / sizeof(dbg->t37_buf->data)) + 1;
 
+	if (info->family_id == MXT_FAMILY_1386)
+		dbg->t37_pages = MXT1386_COLUMNS * MXT1386_PAGES_PER_COLUMN;
+	else
+		dbg->t37_pages = ((data->xsize * info->matrix_ysize)
+				   * sizeof(u16) / sizeof(dbg->t37_buf->data))
+				   + 1;
 
 	dbg->t37_buf = devm_kzalloc(&data->client->dev,
 				     sizeof(struct t37_debug) * dbg->t37_pages,
