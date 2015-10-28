@@ -1,22 +1,14 @@
 / {
 	spi@7000d800 {
-		synaptics_dsx@0 {
-			compatible = "synaptics,dsx";
+		rmi4-spi-dev@0 {
+			compatible = "syna,rmi4-spi";
 			reg = <0x0>;
 			spi-max-frequency = <4000000>;
 			spi-cpha;
 			spi-cpol;
 			interrupt-parent = <&gpio>;
 			interrupts = <TEGRA_GPIO(K, 2) 0x2>;
-			synaptics,irq-gpio = <&gpio TEGRA_GPIO(K, 2) 0x00>;
-			synaptics,irq-flags = <0x2008>;
-			synaptics,reset-gpio = <&gpio TEGRA_GPIO(X, 6) 0x00>;
-			synaptics,reset-on-state = <0>;
-			synaptics,reset-active-ms = <20>;
-			synaptics,reset-delay-ms = <100>;
-			synaptics,byte-delay-us = <30>;
-			synaptics,block-delay-us = <30>;
-			synaptics,tw-pin-mask = <0x05>;
+			spi-rx-delay-us = <30>;
 
 			config_9 {
 				pr_number     = <1732172>;
