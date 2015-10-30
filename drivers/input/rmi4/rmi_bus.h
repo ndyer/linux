@@ -11,6 +11,7 @@
 #define _RMI_BUS_H
 
 #include <linux/rmi.h>
+#include "rmi_compat.h"
 
 struct rmi_device;
 
