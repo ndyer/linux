@@ -274,6 +274,9 @@ struct mxt_dbg {
 	struct dentry *debugfs_dir;
 	struct mxt_debug_entry entries[ARRAY_SIZE(mxt_dbg_datatypes)];
 	struct mutex dbg_mutex;
+	struct debugfs_blob_wrapper input_name_wrapper;
+	char info[50];
+	struct debugfs_blob_wrapper info_wrapper;
 };
 #endif
 
@@ -2326,6 +2329,18 @@ static void mxt_debugfs_init(struct mxt_data *data)
 		return;
 	}
 
+	dbg->info_wrapper.data = dbg->info;
+	dbg->info_wrapper.size = sizeof(dbg->info);
+	scnprintf(dbg->info, sizeof(dbg->info),
+		 "Family: %u Variant: %u Firmware V%u.%u.%02X",
+		 info->family_id, info->variant_id, info->version >> 4,
+		 info->version & 0xf, info->build);
+
+	dent = debugfs_create_blob("info", S_IRUGO, dbg->debugfs_dir,
+			&dbg->info_wrapper);
+	if (!dent)
+		goto error;
+
 	/* Calculate size of data and allocate buffer */
 	dbg->t37_nodes = data->xsize * data->ysize;
 
@@ -2367,6 +2382,13 @@ static void mxt_debugfs_init(struct mxt_data *data)
 		e->desc_wrapper.size = strlen(e->datatype->desc);
 		dent = debugfs_create_blob("name", S_IRUGO,
 					   dir, &e->desc_wrapper);
+		if (!dent)
+			goto error;
+
+		dbg->input_name_wrapper.data = (void *)data->input_dev->name;
+		dbg->input_name_wrapper.size = strlen(data->input_dev->name);
+		dent = debugfs_create_blob("input_name", S_IRUGO,
+					   dir, &dbg->input_name_wrapper);
 		if (!dent)
 			goto error;
 

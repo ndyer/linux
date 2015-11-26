@@ -6,6 +6,13 @@ Description:
 	A directory will be created under heatmap for each device which
 	provides heatmap data.
 
+What:           /sys/kernel/debug/heatmap-dev_driver_string-dev_name/info
+Date:
+KernelVersion:
+Contact:
+Description:
+        Info relating to the device, eg hardware/firmware version
+
 What:		/sys/kernel/debug/heatmap-dev_driver_string-dev_name/datatype/
 Date:
 KernelVersion:
@@ -47,6 +54,13 @@ KernelVersion:
 Contact:
 Description:
 	Display name for the data.
+
+What:		/sys/kernel/debug/heatmap-xxx/datatype/input_name
+Date:
+KernelVersion:
+Contact:
+Description:
+	The name of the corresponding input device, if relevant.
 
 What:		/sys/kernel/debug/heatmap-xxx/datatype/data
 Date:
