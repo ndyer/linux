@@ -135,6 +135,7 @@ struct t9_range {
 /* MXT_DEBUG_DIAGNOSTIC_T37 */
 #define MXT_DIAGNOSTIC_PAGEUP 0x01
 #define MXT_DIAGNOSTIC_DELTAS 0x10
+#define MXT_DIAGNOSTIC_REFS   0x11
 #define MXT_DIAGNOSTIC_SIZE    128
 
 #define MXT_FAMILY_1386			160
@@ -245,6 +246,12 @@ struct mxt_dbg {
 	struct vb2_queue queue;
 	struct mutex lock;
 	int input;
+};
+
+enum v4l_dbg_inputs {
+	MXT_V4L_INPUT_DELTAS,
+	MXT_V4L_INPUT_REFS,
+	MXT_V4L_INPUT_MAX,
 };
 
 static const struct v4l2_file_operations mxt_video_fops = {
@@ -2270,6 +2277,7 @@ static void mxt_buffer_queue(struct vb2_buffer *vb)
 	struct mxt_data *data = vb2_get_drv_priv(vb->vb2_queue);
 	u16 *ptr;
 	int ret;
+	u8 mode;
 
 	ptr = vb2_plane_vaddr(vb, 0);
 	if (!ptr) {
@@ -2277,7 +2285,18 @@ static void mxt_buffer_queue(struct vb2_buffer *vb)
 		goto fault;
 	}
 
-	ret = mxt_read_diagnostic_debug(data, MXT_DIAGNOSTIC_DELTAS, ptr);
+	switch (data->dbg.input) {
+	case MXT_V4L_INPUT_DELTAS:
+	default:
+		mode = MXT_DIAGNOSTIC_DELTAS;
+		break;
+
+	case MXT_V4L_INPUT_REFS:
+		mode = MXT_DIAGNOSTIC_REFS;
+		break;
+	}
+
+	ret = mxt_read_diagnostic_debug(data, mode, ptr);
 	if (ret)
 		goto fault;
 
@@ -2327,13 +2346,22 @@ static int mxt_vidioc_querycap(struct file *file, void *priv,
 static int mxt_vidioc_enum_input(struct file *file, void *priv,
 				   struct v4l2_input *i)
 {
-	if (i->index > 0)
+	if (i->index >= MXT_V4L_INPUT_MAX)
 		return -EINVAL;
 
 	i->type = V4L2_INPUT_TYPE_CAMERA;
 	i->std = V4L2_STD_UNKNOWN;
 	i->capabilities = 0;
-	strlcpy(i->name, "Mutual References", sizeof(i->name));
+
+	switch (i->index) {
+	case MXT_V4L_INPUT_REFS:
+		strlcpy(i->name, "Mutual References", sizeof(i->name));
+		break;
+	case MXT_V4L_INPUT_DELTAS:
+		strlcpy(i->name, "Mutual Deltas", sizeof(i->name));
+		break;
+	}
+
 	return 0;
 }
 
@@ -2341,7 +2369,7 @@ static int mxt_set_input(struct mxt_data *data, unsigned int i)
 {
 	struct v4l2_pix_format *f = &data->dbg.format;
 
-	if (i > 0)
+	if (i >= MXT_V4L_INPUT_MAX)
 		return -EINVAL;
 
 	f->width = data->xy_switch ? data->ysize : data->xsize;
