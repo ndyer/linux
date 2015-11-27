@@ -1,0 +1,60 @@
+What:		/sys/kernel/debug/heatmap-dev_driver_string-dev_name/
+Date:
+KernelVersion:
+Contact:
+Description:
+	A directory will be created under heatmap for each device which
+	provides heatmap data.
+
+What:		/sys/kernel/debug/heatmap-dev_driver_string-dev_name/datatype/
+Date:
+KernelVersion:
+Contact:
+Description:
+	The device can have multiple heatmap data types. A directory is created
+	for each one.
+
+What:		/sys/kernel/debug/heatmap-xxx/datatype/format
+Date:
+KernelVersion:
+Contact:
+Description:
+	Specifies the type of each data value, one of:
+		uint8
+		uint16
+		uint32
+		int8
+		int16
+		int32
+
+What:		/sys/kernel/debug/heatmap-xxx/datatype/width
+Date:
+KernelVersion:
+Contact:
+Description:
+	The width of the data.
+
+What:		/sys/kernel/debug/heatmap-xxx/datatype/height
+Date:
+KernelVersion:
+Contact:
+Description:
+	The height of the data.
+
+What:		/sys/kernel/debug/heatmap-xxx/datatype/name
+Date:
+KernelVersion:
+Contact:
+Description:
+	Display name for the data.
+
+What:		/sys/kernel/debug/heatmap-xxx/datatype/data
+Date:
+KernelVersion:
+Contact:
+Description:
+	Binary attribute for the data.
+
+	The orientation of the data should correspond to the co-ordinates
+	reported to the input layer. Starting at the top left hand corner, rows
+	then columns.  The endianness of data values will be as per host cpu.

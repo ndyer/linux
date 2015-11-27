@@ -236,21 +236,31 @@ struct mxt_object {
 struct mxt_debug_datatype {
 	u8 mode;
 	char *name;
+	char *desc;
+	char *format;
 };
 
 struct mxt_debug_entry {
 	struct mxt_data *data;
 	const struct mxt_debug_datatype *datatype;
+	u16 width;
+	u16 height;
+	struct debugfs_blob_wrapper format_wrapper;
+	struct debugfs_blob_wrapper desc_wrapper;
 };
 
 static const struct mxt_debug_datatype mxt_dbg_datatypes[] = {
 	{
 		.mode = MXT_DIAGNOSTIC_REFS,
 		.name = "refs",
+		.desc = "Mutual Capacitance References",
+		.format = "uint16",
 	},
 	{
 		.mode = MXT_DIAGNOSTIC_DELTAS,
 		.name = "deltas",
+		.desc = "Mutual Capacitance Deltas",
+		.format = "int16",
 	},
 };
 
@@ -2286,6 +2296,7 @@ static void mxt_debugfs_init(struct mxt_data *data)
 	char dirname[50];
 	struct dentry *dent;
 	struct mxt_debug_entry *e;
+	struct dentry *dir;
 	int i;
 
 	object = mxt_get_object(data, MXT_GEN_COMMAND_T6);
@@ -2337,9 +2348,40 @@ static void mxt_debugfs_init(struct mxt_data *data)
 		e->data = data;
 		e->datatype = mxt_dbg_datatypes + i;
 
-		dent = debugfs_create_file(mxt_dbg_datatypes[i].name, S_IRUGO,
-					   dbg->debugfs_dir, e,
-					   &mxt_debugfs_data_ops);
+		dir = debugfs_create_dir(mxt_dbg_datatypes[i].name,
+					 dbg->debugfs_dir);
+		if (!dir)
+			goto error;
+
+		e->width = data->xyswitch ? data->ysize : data->xsize;
+		e->height = data->xyswitch ? data->xsize : data->ysize;
+
+		e->format_wrapper.data = (void *)e->datatype->format;
+		e->format_wrapper.size = strlen(e->datatype->format);
+		dent = debugfs_create_blob("format", S_IRUGO,
+					   dir, &e->format_wrapper);
+		if (!dent)
+			goto error;
+
+		e->desc_wrapper.data = (void *)e->datatype->desc;
+		e->desc_wrapper.size = strlen(e->datatype->desc);
+		dent = debugfs_create_blob("name", S_IRUGO,
+					   dir, &e->desc_wrapper);
+		if (!dent)
+			goto error;
+
+		dent = debugfs_create_u16("width", S_IRUGO,
+					  dir, &e->width);
+		if (!dent)
+			goto error;
+
+		dent = debugfs_create_u16("height", S_IRUGO,
+					  dir, &e->height);
+		if (!dent)
+			goto error;
+
+		dent = debugfs_create_file("data", S_IRUGO,
+					   dir, e, &mxt_debugfs_data_ops);
 		if (!dent)
 			goto error;
 	}
