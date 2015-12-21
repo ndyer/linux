@@ -238,6 +238,7 @@ struct mxt_debug_datatype {
 	char *name;
 	char *desc;
 	char *format;
+	bool single_node;
 };
 
 struct mxt_debug_entry {
@@ -262,6 +263,20 @@ static const struct mxt_debug_datatype mxt_dbg_datatypes[] = {
 		.desc = "Mutual Capacitance Deltas",
 		.format = "int16",
 	},
+	{
+		.mode = MXT_DIAGNOSTIC_REFS,
+		.name = "single_node_refs",
+		.desc = "Single Node References",
+		.format = "uint16",
+		.single_node = true,
+	},
+	{
+		.mode = MXT_DIAGNOSTIC_DELTAS,
+		.name = "single_node_deltas",
+		.format = "int16",
+		.desc = "Single Node Deltas",
+		.single_node = true,
+	},
 };
 
 struct mxt_dbg {
@@ -270,6 +285,7 @@ struct mxt_dbg {
 	struct t37_debug *t37_buf;
 	unsigned int t37_pages;
 	unsigned int t37_nodes;
+	unsigned int single_node_ofs;
 
 	struct dentry *debugfs_dir;
 	struct mxt_debug_entry entries[ARRAY_SIZE(mxt_dbg_datatypes)];
@@ -2216,14 +2232,16 @@ static int mxt_read_diagnostic_debug(struct seq_file *s, void *d)
 	struct mxt_dbg *dbg = &data->dbg;
 	int retries = 0;
 	int page;
+	int pages = e->datatype->single_node ? 1 : dbg->t37_pages;
 	int ret;
 	u8 mode = e->datatype->mode;
 	u8 cmd = mode;
 	struct t37_debug *p;
+	u16 val;
 
 	mutex_lock(&dbg->dbg_mutex);
 
-	for (page = 0; page < dbg->t37_pages; page++) {
+	for (page = 0; page < pages; page++) {
 		p = dbg->t37_buf + page;
 
 		ret = mxt_write_reg(data->client, dbg->diag_cmd_address,
@@ -2263,7 +2281,14 @@ wait_cmd:
 		cmd = MXT_DIAGNOSTIC_PAGEUP;
 	}
 
-	ret = mxt_convert_debug_pages(s, data);
+	if (e->datatype->single_node) {
+		val = get_unaligned_le16(&dbg->t37_buf[0]
+					 .data[dbg->single_node_ofs]);
+		seq_write(s, &val, sizeof(u16));
+		ret = 0;
+	} else {
+		ret = mxt_convert_debug_pages(s, data);
+	}
 
 release:
 	mutex_unlock(&dbg->dbg_mutex);
@@ -2273,7 +2298,12 @@ release:
 static int mxt_debugfs_data_open(struct inode *inode, struct file *f)
 {
 	struct mxt_debug_entry *e = inode->i_private;
-	size_t size = e->data->dbg.t37_nodes * sizeof(u16);
+	size_t size;
+
+	if (e->datatype->single_node)
+		size = sizeof(u16);
+	else
+		size = e->data->dbg.t37_nodes * sizeof(u16);
 
 	return single_open_size(f, mxt_read_diagnostic_debug, e, size);
 }
@@ -2289,6 +2319,19 @@ static const struct file_operations mxt_debugfs_data_ops = {
 static void mxt_debugfs_remove(struct mxt_data *data)
 {
 	debugfs_remove_recursive(data->dbg.debugfs_dir);
+}
+
+static void mxt_debugfs_calc_single_node_ofs(struct mxt_data *data)
+{
+	struct mxt_info *info = &data->info;
+	int ofs = data->ysize / 2;
+
+	while ((ofs + info->matrix_ysize) <= (MXT_DIAGNOSTIC_SIZE/sizeof(u16)))
+		ofs += info->matrix_ysize;
+
+	dev_dbg(&data->client->dev, "Single node ofs: %d\n", ofs);
+
+	data->dbg.single_node_ofs = ofs;
 }
 
 static void mxt_debugfs_init(struct mxt_data *data)
@@ -2358,6 +2401,8 @@ static void mxt_debugfs_init(struct mxt_data *data)
 	if (!dbg->t37_buf)
 		goto error;
 
+	mxt_debugfs_calc_single_node_ofs(data);
+
 	for (i = 0; i < ARRAY_SIZE(mxt_dbg_datatypes); i++) {
 		e = &dbg->entries[i];
 		e->data = data;
@@ -2368,8 +2413,13 @@ static void mxt_debugfs_init(struct mxt_data *data)
 		if (!dir)
 			goto error;
 
-		e->width = data->xyswitch ? data->ysize : data->xsize;
-		e->height = data->xyswitch ? data->xsize : data->ysize;
+		if (e->datatype->single_node) {
+			e->width = 1;
+			e->height = 1;
+		} else {
+			e->width = data->xyswitch ? data->ysize : data->xsize;
+			e->height = data->xyswitch ? data->xsize : data->ysize;
+		}
 
 		e->format_wrapper.data = (void *)e->datatype->format;
 		e->format_wrapper.size = strlen(e->datatype->format);
