@@ -2300,10 +2300,11 @@ static int mxt_debugfs_data_open(struct inode *inode, struct file *f)
 	struct mxt_debug_entry *e = inode->i_private;
 	size_t size;
 
+	/* Size seq_file to contain data. Allow 1 byte to prevent overflow */
 	if (e->datatype->single_node)
-		size = sizeof(u16);
+		size = sizeof(u16) + 1;
 	else
-		size = e->data->dbg.t37_nodes * sizeof(u16);
+		size = e->data->dbg.t37_nodes * sizeof(u16) + 1;
 
 	return single_open_size(f, mxt_read_diagnostic_debug, e, size);
 }
