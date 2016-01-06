@@ -2329,6 +2329,8 @@ static void mxt_debugfs_calc_single_node_ofs(struct mxt_data *data)
 	while ((ofs + info->matrix_ysize) <= (MXT_DIAGNOSTIC_SIZE/sizeof(u16)))
 		ofs += info->matrix_ysize;
 
+	ofs *= sizeof(u16);
+
 	dev_dbg(&data->client->dev, "Single node ofs: %d\n", ofs);
 
 	data->dbg.single_node_ofs = ofs;
