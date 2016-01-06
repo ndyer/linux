@@ -2238,6 +2238,7 @@ static int mxt_read_diagnostic_debug(struct seq_file *s, void *d)
 	u8 cmd = mode;
 	struct t37_debug *p;
 	u16 val;
+	u8 cmd_poll;
 
 	mutex_lock(&dbg->dbg_mutex);
 
@@ -2250,17 +2251,16 @@ static int mxt_read_diagnostic_debug(struct seq_file *s, void *d)
 			goto release;
 
 		retries = 0;
-
-		/* Poll until command is actioned */
 		msleep(20);
 wait_cmd:
-		/* Read first two bytes only */
-		ret = __mxt_read_reg(data->client, dbg->t37_address,
-				     2, p);
+		/* Read back command byte */
+		ret = __mxt_read_reg(data->client, dbg->diag_cmd_address,
+				     sizeof(cmd_poll), &cmd_poll);
 		if (ret)
 			goto release;
 
-		if ((p->mode != mode) || (p->page != page)) {
+		/* Field is cleared once the command has been processed */
+		if (cmd_poll) {
 			if (retries++ > 100)
 				return -EINVAL;
 
@@ -2268,11 +2268,16 @@ wait_cmd:
 			goto wait_cmd;
 		}
 
-		/* Read entire T37 page */
+		/* Read T37 page */
 		ret = __mxt_read_reg(data->client, dbg->t37_address,
 				sizeof(struct t37_debug), p);
 		if (ret)
 			goto release;
+
+		if ((p->mode != mode) || (p->page != page)) {
+			dev_err(&data->client->dev, "T37 page mismatch\n");
+			return -EINVAL;
+		}
 
 		dev_dbg(&data->client->dev, "%s page:%d retries:%d\n",
 			__func__, page, retries);
