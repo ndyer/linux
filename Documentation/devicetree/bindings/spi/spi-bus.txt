@@ -55,6 +55,8 @@ contain the following properties.
     		chip select active high
 - spi-3wire       - (optional) Empty property indicating device requires
     		    3-wire mode.
+- spi-rx-delay-us  - (optional) Microsecond delay after a read transfer.
+- spi-tx-delay-us  - (optional) Microsecond delay after a write transfer.
 
 If a gpio chipselect is used for the SPI slave the gpio number will be passed
 via the cs_gpio
