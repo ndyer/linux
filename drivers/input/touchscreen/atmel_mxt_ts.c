@@ -2396,21 +2396,24 @@ static int mxt_set_input(struct mxt_data *data, unsigned int i)
 	if (i >= MXT_V4L_INPUT_MAX)
 		return -EINVAL;
 
+	f->pixelformat = V4L2_PIX_FMT_Y16;
+
 	switch (i) {
-	case MXT_V4L_INPUT_REFS:
 	case MXT_V4L_INPUT_DELTAS:
+		f->pixelformat = V4L2_PIX_FMT_YS16; /* fall-through */
+	case MXT_V4L_INPUT_REFS:
 		f->width = data->xy_switch ? data->ysize : data->xsize;
 		f->height = data->xy_switch ? data->xsize : data->ysize;
 		break;
 
-	case MXT_V4L_INPUT_REFS_SINGLE:
 	case MXT_V4L_INPUT_DELTAS_SINGLE:
+		f->pixelformat = V4L2_PIX_FMT_YS16; /* fall-through */
+	case MXT_V4L_INPUT_REFS_SINGLE:
 		f->width = 1;
 		f->height = 1;
 		break;
 	}
 
-	f->pixelformat = V4L2_PIX_FMT_Y16;
 	f->field = V4L2_FIELD_NONE;
 	f->colorspace = V4L2_COLORSPACE_SRGB;
 	f->bytesperline = f->width * sizeof(u16);
@@ -2447,12 +2450,26 @@ static int mxt_vidioc_fmt(struct file *file, void *priv, struct v4l2_format *f)
 static int mxt_vidioc_enum_fmt(struct file *file, void *priv,
 				 struct v4l2_fmtdesc *fmt)
 {
-	if (fmt->index > 0 || fmt->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+	if (fmt->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
 
-	fmt->pixelformat = V4L2_PIX_FMT_Y16;
-	strlcpy(fmt->description, "16-bit raw debug data",
-		sizeof(fmt->description));
+	switch (fmt->index) {
+	case 0:
+		fmt->pixelformat = V4L2_PIX_FMT_Y16;
+		strlcpy(fmt->description, "16-bit unsigned raw debug data",
+			sizeof(fmt->description));
+		break;
+
+	case 1:
+		fmt->pixelformat = V4L2_PIX_FMT_YS16;
+		strlcpy(fmt->description, "16-bit signed raw debug data",
+			sizeof(fmt->description));
+		break;
+
+	default:
+		return -EINVAL;
+	}
+
 	fmt->flags = 0;
 	return 0;
 }
@@ -2484,7 +2501,7 @@ static int mxt_vidioc_enum_framesizes(struct file *file, void *priv,
 static int mxt_vidioc_enum_frameintervals(struct file *file, void *priv,
 					  struct v4l2_frmivalenum *f)
 {
-	if ((f->index > 0) || (f->pixel_format != V4L2_PIX_FMT_Y16))
+	if (f->index > 0)
 		return -EINVAL;
 
 	f->type = V4L2_FRMIVAL_TYPE_DISCRETE;
