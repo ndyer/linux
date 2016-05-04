@@ -202,6 +202,11 @@
 	    <entry>typically, /dev/swradio?</entry>
 	  </row>
 	  <row>
+	    <entry><constant>MEDIA_INTF_T_V4L_TOUCH</constant></entry>
+	    <entry>Device node interface for Touch device (V4L)</entry>
+	    <entry>typically, /dev/v4l-touch?</entry>
+	  </row>
+	  <row>
 	    <entry><constant>MEDIA_INTF_T_ALSA_PCM_CAPTURE</constant></entry>
 	    <entry>Device node interface for ALSA PCM Capture</entry>
 	    <entry>typically, /dev/snd/pcmC?D?c</entry>

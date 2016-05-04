@@ -77,6 +77,7 @@ struct media_device_info {
 #define MEDIA_ENT_F_IO_DTV		(MEDIA_ENT_F_BASE + 0x01001)
 #define MEDIA_ENT_F_IO_VBI		(MEDIA_ENT_F_BASE + 0x01002)
 #define MEDIA_ENT_F_IO_SWRADIO		(MEDIA_ENT_F_BASE + 0x01003)
+#define MEDIA_ENT_F_IO_TOUCH		(MEDIA_ENT_F_BASE + 0x01004)
 
 /*
  * Analog TV IF-PLL decoders

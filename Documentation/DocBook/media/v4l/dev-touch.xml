@@ -1,0 +1,53 @@
+<title>Touch Devices</title>
+
+<para>Touch devices are accessed through character device special files
+  named <filename>/dev/v4l-touch0</filename> to
+  <filename>/dev/v4l-touch255</filename> with major number 81 and
+  dynamically allocated minor numbers 0 to 255.</para>
+
+<section>
+  <title>Overview</title>
+
+  <para>Sensors may be Optical, or Projected Capacitive touch (PCT).</para>
+
+  <para>Processing is required to analyse the raw data and produce input
+    events. In some systems, this may be performed on the ASIC and the raw data
+    is purely a side-channel for diagnostics or tuning. In other systems, the
+    ASIC is a simple analogue front end device which delivers touch data at
+    high rate, and any touch processing must be done on the host.</para>
+
+  <para>For capacitive touch sensing, the touchscreen is composed of an array
+    of horizontal and vertical conductors (alternatively called rows/columns,
+    X/Y lines, or tx/rx). Mutual Capacitance measured is at the nodes where the
+    conductors cross. Alternatively, Self Capacitance measures the signal from
+    each column and row independently.</para>
+
+  <para>A touch input may be determined by comparing the raw capacitance
+    measurement to a no-touch reference (or "baseline") measurement:</para>
+
+  <para>Delta = Raw - Reference</para>
+
+  <para>The reference measurement takes account of variations in the
+    capacitance across the touch sensor matrix, for example
+    manufacturing irregularities, environmental or edge effects.</para>
+</section>
+
+<section>
+  <title>Querying Capabilities</title>
+
+  <para>Devices supporting the touch interface set the
+    <constant>V4L2_CAP_VIDEO_CAPTURE</constant> flag in the
+    <structfield>capabilities</structfield> field of &v4l2-capability;
+    returned by the &VIDIOC-QUERYCAP; ioctl.</para>
+
+  <para>At least one of the read/write, streaming or asynchronous I/O methods
+    must be supported.</para>
+</section>
+
+<section>
+  <title>Data Format Negotiation</title>
+
+  <para> A touch device may support <link linkend="rw">read/write</link>
+    and/or streaming (<link linkend="mmap">memory mapping</link> or
+    <link linkend="userp">user pointer</link>) I/O.</para>
+</section>
