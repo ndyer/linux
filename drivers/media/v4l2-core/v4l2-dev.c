@@ -529,6 +529,7 @@ static void determine_valid_ioctls(struct video_device *vdev)
 	bool is_sdr = vdev->vfl_type == VFL_TYPE_SDR;
 	bool is_rx = vdev->vfl_dir != VFL_DIR_TX;
 	bool is_tx = vdev->vfl_dir != VFL_DIR_RX;
+	bool is_touch = vdev->vfl_type == VFL_TYPE_TOUCH_SENSOR;
 
 	bitmap_zero(valid_ioctls, BASE_VIDIOC_PRIVATE);
 
@@ -573,7 +574,7 @@ static void determine_valid_ioctls(struct video_device *vdev)
 	if (ops->vidioc_enum_freq_bands || ops->vidioc_g_tuner || ops->vidioc_g_modulator)
 		set_bit(_IOC_NR(VIDIOC_ENUM_FREQ_BANDS), valid_ioctls);
 
-	if (is_vid) {
+	if (is_vid || is_touch) {
 		/* video specific ioctls */
 		if ((is_rx && (ops->vidioc_enum_fmt_vid_cap ||
 			       ops->vidioc_enum_fmt_vid_cap_mplane ||
@@ -662,7 +663,7 @@ static void determine_valid_ioctls(struct video_device *vdev)
 			set_bit(_IOC_NR(VIDIOC_TRY_FMT), valid_ioctls);
 	}
 
-	if (is_vid || is_vbi || is_sdr) {
+	if (is_vid || is_vbi || is_sdr || is_touch) {
 		/* ioctls valid for video, vbi or sdr */
 		SET_VALID_IOCTL(ops, VIDIOC_REQBUFS, vidioc_reqbufs);
 		SET_VALID_IOCTL(ops, VIDIOC_QUERYBUF, vidioc_querybuf);
@@ -675,7 +676,7 @@ static void determine_valid_ioctls(struct video_device *vdev)
 		SET_VALID_IOCTL(ops, VIDIOC_STREAMOFF, vidioc_streamoff);
 	}
 
-	if (is_vid || is_vbi) {
+	if (is_vid || is_vbi || is_touch) {
 		/* ioctls valid for video or vbi */
 		if (ops->vidioc_s_std)
 			set_bit(_IOC_NR(VIDIOC_ENUMSTD), valid_ioctls);
@@ -739,6 +740,7 @@ static int video_register_media_controller(struct video_device *vdev, int type)
 	vdev->entity.function = MEDIA_ENT_F_UNKNOWN;
 
 	switch (type) {
+	case VFL_TYPE_TOUCH_SENSOR:
 	case VFL_TYPE_GRABBER:
 		intf_type = MEDIA_INTF_T_V4L_VIDEO;
 		vdev->entity.function = MEDIA_ENT_F_IO_V4L;
@@ -845,6 +847,8 @@ static int video_register_media_controller(struct video_device *vdev, int type)
  *	%VFL_TYPE_SUBDEV - A subdevice
  *
  *	%VFL_TYPE_SDR - Software Defined Radio
+ *
+ *	%VFL_TYPE_TOUCH_SENSOR - A touch sensor
  */
 int __video_register_device(struct video_device *vdev, int type, int nr,
 		int warn_if_nr_in_use, struct module *owner)
@@ -887,6 +891,9 @@ int __video_register_device(struct video_device *vdev, int type, int nr,
 	case VFL_TYPE_SDR:
 		/* Use device name 'swradio' because 'sdr' was already taken. */
 		name_base = "swradio";
+		break;
+	case VFL_TYPE_TOUCH_SENSOR:
+		name_base = "v4l-touch";
 		break;
 	default:
 		printk(KERN_ERR "%s called with unknown type: %d\n",
