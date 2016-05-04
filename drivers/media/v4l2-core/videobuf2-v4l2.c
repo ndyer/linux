@@ -554,6 +554,7 @@ int vb2_create_bufs(struct vb2_queue *q, struct v4l2_create_buffers *create)
 		break;
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
 	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
+	case V4L2_BUF_TYPE_TOUCH_CAPTURE:
 		requested_sizes[0] = f->fmt.pix.sizeimage;
 		break;
 	case V4L2_BUF_TYPE_VBI_CAPTURE:

@@ -155,6 +155,7 @@ const char *v4l2_type_names[] = {
 	[V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE] = "vid-out-mplane",
 	[V4L2_BUF_TYPE_SDR_CAPTURE]        = "sdr-cap",
 	[V4L2_BUF_TYPE_SDR_OUTPUT]         = "sdr-out",
+	[V4L2_BUF_TYPE_TOUCH_CAPTURE]      = "tch-cap",
 };
 EXPORT_SYMBOL(v4l2_type_names);
 
@@ -255,6 +256,7 @@ static void v4l_print_format(const void *arg, bool write_only)
 	switch (p->type) {
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
 	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
+	case V4L2_BUF_TYPE_TOUCH_CAPTURE:
 		pix = &p->fmt.pix;
 		pr_cont(", width=%u, height=%u, "
 			"pixelformat=%c%c%c%c, field=%s, "
@@ -924,6 +926,7 @@ static int check_fmt(struct file *file, enum v4l2_buf_type type)
 	bool is_vid = vfd->vfl_type == VFL_TYPE_GRABBER;
 	bool is_vbi = vfd->vfl_type == VFL_TYPE_VBI;
 	bool is_sdr = vfd->vfl_type == VFL_TYPE_SDR;
+	bool is_tch = vfd->vfl_type == VFL_TYPE_TOUCH;
 	bool is_rx = vfd->vfl_dir != VFL_DIR_TX;
 	bool is_tx = vfd->vfl_dir != VFL_DIR_RX;
 
@@ -979,6 +982,10 @@ static int check_fmt(struct file *file, enum v4l2_buf_type type)
 		break;
 	case V4L2_BUF_TYPE_SDR_OUTPUT:
 		if (is_sdr && is_tx && ops->vidioc_g_fmt_sdr_out)
+			return 0;
+		break;
+	case V4L2_BUF_TYPE_TOUCH_CAPTURE:
+		if (is_tch && is_rx && ops->vidioc_g_fmt_vid_cap)
 			return 0;
 		break;
 	default:
@@ -1243,6 +1250,10 @@ static void v4l_fill_fmtdesc(struct v4l2_fmtdesc *fmt)
 	case V4L2_SDR_FMT_CS8:		descr = "Complex S8"; break;
 	case V4L2_SDR_FMT_CS14LE:	descr = "Complex S14LE"; break;
 	case V4L2_SDR_FMT_RU12LE:	descr = "Real U12LE"; break;
+	case V4L2_TCH_FMT_DELTA_TD16:	descr = "16-bit signed deltas"; break;
+	case V4L2_TCH_FMT_DELTA_TD08:	descr = "8-bit signed deltas"; break;
+	case V4L2_TCH_FMT_TU16:		descr = "16-bit unsigned touch data"; break;
+	case V4L2_TCH_FMT_TU08:		descr = "8-bit unsigned touch data"; break;
 
 	default:
 		/* Compressed formats */
@@ -1309,6 +1320,7 @@ static int v4l_enum_fmt(const struct v4l2_ioctl_ops *ops,
 	struct video_device *vfd = video_devdata(file);
 	bool is_vid = vfd->vfl_type == VFL_TYPE_GRABBER;
 	bool is_sdr = vfd->vfl_type == VFL_TYPE_SDR;
+	bool is_tch = vfd->vfl_type == VFL_TYPE_TOUCH;
 	bool is_rx = vfd->vfl_dir != VFL_DIR_TX;
 	bool is_tx = vfd->vfl_dir != VFL_DIR_RX;
 	int ret = -EINVAL;
@@ -1349,6 +1361,11 @@ static int v4l_enum_fmt(const struct v4l2_ioctl_ops *ops,
 			break;
 		ret = ops->vidioc_enum_fmt_sdr_out(file, fh, arg);
 		break;
+	case V4L2_BUF_TYPE_TOUCH_CAPTURE:
+		if (unlikely(!is_rx || !is_tch || !ops->vidioc_enum_fmt_vid_cap))
+			break;
+		ret = ops->vidioc_enum_fmt_vid_cap(file, fh, arg);
+		break;
 	}
 	if (ret == 0)
 		v4l_fill_fmtdesc(p);
@@ -1362,6 +1379,7 @@ static int v4l_g_fmt(const struct v4l2_ioctl_ops *ops,
 	struct video_device *vfd = video_devdata(file);
 	bool is_vid = vfd->vfl_type == VFL_TYPE_GRABBER;
 	bool is_sdr = vfd->vfl_type == VFL_TYPE_SDR;
+	bool is_tch = vfd->vfl_type == VFL_TYPE_TOUCH;
 	bool is_rx = vfd->vfl_dir != VFL_DIR_TX;
 	bool is_tx = vfd->vfl_dir != VFL_DIR_RX;
 	int ret;
@@ -1447,6 +1465,14 @@ static int v4l_g_fmt(const struct v4l2_ioctl_ops *ops,
 		if (unlikely(!is_tx || !is_sdr || !ops->vidioc_g_fmt_sdr_out))
 			break;
 		return ops->vidioc_g_fmt_sdr_out(file, fh, arg);
+	case V4L2_BUF_TYPE_TOUCH_CAPTURE:
+		if (unlikely(!is_rx || !is_tch || !ops->vidioc_g_fmt_vid_cap))
+			break;
+		p->fmt.pix.priv = V4L2_PIX_FMT_PRIV_MAGIC;
+		ret = ops->vidioc_g_fmt_vid_cap(file, fh, arg);
+		/* just in case the driver zeroed it again */
+		p->fmt.pix.priv = V4L2_PIX_FMT_PRIV_MAGIC;
+		return ret;
 	}
 	return -EINVAL;
 }
@@ -1458,6 +1484,7 @@ static int v4l_s_fmt(const struct v4l2_ioctl_ops *ops,
 	struct video_device *vfd = video_devdata(file);
 	bool is_vid = vfd->vfl_type == VFL_TYPE_GRABBER;
 	bool is_sdr = vfd->vfl_type == VFL_TYPE_SDR;
+	bool is_tch = vfd->vfl_type == VFL_TYPE_TOUCH;
 	bool is_rx = vfd->vfl_dir != VFL_DIR_TX;
 	bool is_tx = vfd->vfl_dir != VFL_DIR_RX;
 	int ret;
@@ -1534,6 +1561,14 @@ static int v4l_s_fmt(const struct v4l2_ioctl_ops *ops,
 			break;
 		CLEAR_AFTER_FIELD(p, fmt.sdr);
 		return ops->vidioc_s_fmt_sdr_out(file, fh, arg);
+	case V4L2_BUF_TYPE_TOUCH_CAPTURE:
+		if (unlikely(!is_rx || !is_tch || !ops->vidioc_s_fmt_vid_cap))
+			break;
+		CLEAR_AFTER_FIELD(p, fmt.pix);
+		ret = ops->vidioc_s_fmt_vid_cap(file, fh, arg);
+		/* just in case the driver zeroed it again */
+		p->fmt.pix.priv = V4L2_PIX_FMT_PRIV_MAGIC;
+		return ret;
 	}
 	return -EINVAL;
 }
@@ -1545,6 +1580,7 @@ static int v4l_try_fmt(const struct v4l2_ioctl_ops *ops,
 	struct video_device *vfd = video_devdata(file);
 	bool is_vid = vfd->vfl_type == VFL_TYPE_GRABBER;
 	bool is_sdr = vfd->vfl_type == VFL_TYPE_SDR;
+	bool is_tch = vfd->vfl_type == VFL_TYPE_TOUCH;
 	bool is_rx = vfd->vfl_dir != VFL_DIR_TX;
 	bool is_tx = vfd->vfl_dir != VFL_DIR_RX;
 	int ret;
@@ -1618,6 +1654,14 @@ static int v4l_try_fmt(const struct v4l2_ioctl_ops *ops,
 			break;
 		CLEAR_AFTER_FIELD(p, fmt.sdr);
 		return ops->vidioc_try_fmt_sdr_out(file, fh, arg);
+	case V4L2_BUF_TYPE_TOUCH_CAPTURE:
+		if (unlikely(!is_rx || !is_tch || !ops->vidioc_try_fmt_vid_cap))
+			break;
+		CLEAR_AFTER_FIELD(p, fmt.pix);
+		ret = ops->vidioc_try_fmt_vid_cap(file, fh, arg);
+		/* just in case the driver zeroed it again */
+		p->fmt.pix.priv = V4L2_PIX_FMT_PRIV_MAGIC;
+		return ret;
 	}
 	return -EINVAL;
 }
