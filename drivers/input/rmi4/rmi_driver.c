@@ -313,6 +313,9 @@ static int rmi_driver_set_irq_bits(struct rmi_device *rmi_dev,
 	bitmap_copy(data->current_irq_mask, data->new_irq_mask,
 		    data->num_of_irq_regs);
 
+	dev_info(dev, "IRQ ctrl: %*ph\n",
+		data->num_of_irq_regs, data->current_irq_mask);
+
 error_unlock:
 	mutex_unlock(&data->irq_mutex);
 	return error;

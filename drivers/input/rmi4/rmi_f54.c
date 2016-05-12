@@ -6,6 +6,8 @@
  * the Free Software Foundation.
  */
 
+#define DEBUG 1
+
 #include <linux/kernel.h>
 #include <linux/rmi.h>
 #include <linux/input.h>
