@@ -301,6 +301,7 @@ static int rmi_f01_probe(struct rmi_function *fn)
 	u16 ctrl_base_addr = fn->fd.control_base_addr;
 	u8 device_status;
 	u8 temp;
+	int i;
 
 	if (fn->dev.of_node) {
 		error = rmi_f01_of_probe(&fn->dev, pdata);
@@ -378,7 +379,12 @@ static int rmi_f01_probe(struct rmi_function *fn)
 
 	/* Advance to interrupt control registers, then skip over them. */
 	ctrl_base_addr++;
-	ctrl_base_addr += f01->num_of_irq_regs;
+
+	for (i=0; i < f01->num_of_irq_regs; i++) {
+		error = rmi_read(rmi_dev, ctrl_base_addr, &temp);
+		dev_info(&fn->dev, "IRQ ctrl register %d: %02X\n", i, temp);
+		ctrl_base_addr++;
+	}
 
 	/* read control register */
 	if (f01->properties.has_adjustable_doze) {
