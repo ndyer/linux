@@ -19,7 +19,7 @@
 #include "rmi_bus.h"
 #include "rmi_driver.h"
 
-static int debug_flags;
+static int debug_flags = RMI_DEBUG_FN | RMI_DEBUG_CORE;
 module_param(debug_flags, int, 0644);
 MODULE_PARM_DESC(debug_flags, "control debugging information");
 
@@ -237,6 +237,9 @@ void rmi_unregister_function(struct rmi_function *fn)
 		of_node_put(fn->dev.of_node);
 
 	put_device(&fn->dev);
+
+	rmi_dbg(RMI_DEBUG_CORE, &fn->rmi_dev->dev, "Unregistered F%02X.\n",
+			fn->fd.function_number);
 }
 
 /**

@@ -328,6 +328,9 @@ static int rmi_driver_set_irq_bits(struct rmi_device *rmi_dev,
 	bitmap_copy(data->current_irq_mask, data->new_irq_mask,
 		    data->num_of_irq_regs);
 
+	dev_info(dev, "IRQ ctrl: %*ph\n",
+		data->num_of_irq_regs, data->current_irq_mask);
+
 error_unlock:
 	mutex_unlock(&data->irq_mutex);
 	return error;
@@ -453,12 +456,21 @@ static int rmi_scan_pdt_page(struct rmi_device *rmi_dev,
 	int retval;
 
 	for (addr = pdt_start; addr >= pdt_end; addr -= RMI_PDT_ENTRY_SIZE) {
+		rmi_dbg(RMI_DEBUG_CORE, &rmi_dev->dev,
+			"%s: addr: %u\n", __func__, addr);
+
 		error = rmi_read_pdt_entry(rmi_dev, &pdt_entry, addr);
 		if (error)
 			return error;
 
-		if (RMI4_END_OF_PDT(pdt_entry.function_number))
+		if (RMI4_END_OF_PDT(pdt_entry.function_number)) {
+			rmi_dbg(RMI_DEBUG_CORE, &rmi_dev->dev,
+				"%s: end of pdt\n", __func__);
 			break;
+		}
+
+		rmi_dbg(RMI_DEBUG_CORE, &rmi_dev->dev, "%s: F%02X version:%d query_base_addr:%x\n",
+			__func__, pdt_entry.function_number, pdt_entry.function_version, pdt_entry.query_base_addr);
 
 		retval = callback(rmi_dev, ctx, &pdt_entry);
 		if (retval != RMI_SCAN_CONTINUE)
@@ -477,7 +489,11 @@ static int rmi_scan_pdt(struct rmi_device *rmi_dev, void *ctx,
 	int page;
 	int retval = RMI_SCAN_DONE;
 
+
 	for (page = 0; page <= RMI4_MAX_PAGE; page++) {
+		rmi_dbg(RMI_DEBUG_CORE, &rmi_dev->dev,
+			"%s: page: %d\n", __func__, page);
+
 		retval = rmi_scan_pdt_page(rmi_dev, page, ctx, callback);
 		if (retval != RMI_SCAN_CONTINUE)
 			break;
