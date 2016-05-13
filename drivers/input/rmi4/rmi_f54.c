@@ -21,7 +21,7 @@
 #define F54_NAME		"rmi4_f54"
 
 #define F54_PERIODIC_SIZE       16
-#define F54_PERIODIC_TIME       2       /* periodic timer, in seconds */
+#define F54_PERIODIC_TIME       0       /* periodic timer, in seconds */
 #define F54_RECAL_LIMIT         60      /* default recalibration limit */
 
 /* F54 data offsets */
