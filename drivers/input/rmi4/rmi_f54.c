@@ -12,6 +12,10 @@
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
+#include <media/v4l2-device.h>
+#include <media/v4l2-ioctl.h>
+#include <media/videobuf2-v4l2.h>
+#include <media/videobuf2-vmalloc.h>
 #include "rmi_driver.h"
 
 #define F54_NAME		"rmi4_f54"
@@ -144,6 +148,7 @@ enum f54_report_type {
 	F54_RX_OPENS2 = 18,
 	F54_FULL_RAW_CAP = 19,
 	F54_FULL_RAW_CAP_RX_COUPLING_COMP = 20,
+	F54_MAX_REPORT_TYPE,
 };
 
 struct f54_data {
@@ -181,6 +186,15 @@ struct f54_data {
 	/* Data used for debugging */
 	u8 control_addr;
 	u8 data_addr;
+
+	/* V4L2 support */
+	struct v4l2_device v4l2;
+	struct v4l2_pix_format format;
+	struct video_device vdev;
+	struct vb2_queue queue;
+	struct mutex lock;
+	int input;
+	enum f54_report_type inputs[F54_MAX_REPORT_TYPE];
 };
 
 /*
@@ -213,6 +227,30 @@ static bool is_f54_report_type_valid(struct f54_data *f54,
 	default:
 		return false;
 	}
+}
+
+static enum f54_report_type rmi_f54_get_reptype(struct f54_data *f54,
+						unsigned int i)
+{
+	if (i > F54_MAX_REPORT_TYPE)
+		return F54_REPORT_NONE;
+
+	return f54->inputs[i];
+}
+
+static void rmi_f54_create_input_map(struct f54_data *f54)
+{
+	int i = 0;
+	enum f54_report_type reptype;
+
+	for (reptype = 1; reptype < F54_MAX_REPORT_TYPE; reptype++) {
+		if (!is_f54_report_type_valid(f54, reptype))
+			continue;
+
+		f54->inputs[i++] = reptype;
+	}
+
+	/* Remaining values are zero via kzalloc */
 }
 
 static int rmi_f54_request_report(struct rmi_function *fn, u8 report_type)
@@ -549,59 +587,6 @@ static ssize_t rmi_f54_command_store(struct device *dev,
 static DEVICE_ATTR(f54_command, S_IRUGO | S_IWUSR,
                    rmi_f54_command_show, rmi_f54_command_store);
 
-static ssize_t rmi_f54_report_type_show(struct device *dev,
-                                        struct device_attribute *attr,
-                                        char *buf)
-{
-	struct f54_data *f54 = dev_get_drvdata(dev);
-
-	return snprintf(buf, PAGE_SIZE, "%u\n", f54->report_type);
-}
-
-static ssize_t rmi_f54_report_type_store(struct device *dev,
-                                         struct device_attribute *attr,
-                                         const char *buf, size_t count)
-{
-	struct f54_data *f54 = dev_get_drvdata(dev);
-	unsigned long val;
-	int error = 0;
-
-	if (kstrtoul(buf, 0, &val)) {
-		dev_err(dev, "Not a digit\n");
-		return -EINVAL;
-	}
-
-	if (val && !is_f54_report_type_valid(f54, val)) {
-		dev_err(dev, "F54 report type %lu not valid\n", val);
-		return -EINVAL;
-	}
-
-	mutex_lock(&f54->periodic_mutex);
-
-	mutex_lock(&f54->status_mutex);
-	if (f54->is_busy) {
-		error = -EBUSY;
-		goto error;
-	}
-
-	if (val == 0) {
-		f54->report_type = 0;
-	} else {
-		error = rmi_f54_request_report(f54->fn, val);
-		if (error)
-			dev_err(dev, "Error requesting F54 report %lu\n", val);
-
-	}
-error:
-	mutex_unlock(&f54->status_mutex);
-	mutex_unlock(&f54->periodic_mutex);
-
-	return error < 0 ? error : count;
-}
-
-static DEVICE_ATTR(f54_report_type, S_IRUGO | S_IWUSR,
-                   rmi_f54_report_type_show, rmi_f54_report_type_store);
-
 static ssize_t rmi_f54_recal_period_show(struct device *dev,
                                          struct device_attribute *attr,
                                          char *buf)
@@ -669,58 +654,6 @@ static ssize_t rmi_f54_recal_limit_store(struct device *dev,
 
 static DEVICE_ATTR(f54_recal_limit, S_IRUGO | S_IWUSR,
                    rmi_f54_recal_limit_show, rmi_f54_recal_limit_store);
-
-/* Provide access to last non-periodic report */
-static ssize_t rmi_f54_report_data_read(struct file *data_file,
-                                        struct kobject *kobj,
-                                        struct bin_attribute *attr,
-                                        char *buf, loff_t pos, size_t count)
-{
-	struct device *dev = container_of(kobj, struct device, kobj);
-	struct f54_data *f54 = dev_get_drvdata(dev);
-	ssize_t ret;
-
-	if (count == 0)
-		return 0;
-
-	mutex_lock(&f54->periodic_mutex);
-	mutex_lock(&f54->data_mutex);
-
-	while (f54->is_busy) {
-		mutex_unlock(&f54->data_mutex);
-		/*
-		 * transfer can take a long time, so wait for up to one second
-		 */
-		if (!wait_for_completion_timeout(&f54->cmd_done,
-		                                 msecs_to_jiffies(1000)))
-			return -ETIMEDOUT;
-		mutex_lock(&f54->data_mutex);
-	}
-	if (f54->report_size == 0) {
-		ret = -ENODATA;
-		goto done;
-	}
-
-	if (pos + count > f54->report_size)
-		count = f54->report_size - pos;
-
-	memcpy(buf, f54->report_data + pos, count);
-	ret = count;
-done:
-	mutex_unlock(&f54->data_mutex);
-	mutex_unlock(&f54->periodic_mutex);
-
-	return ret;
-}
-
-static struct bin_attribute f54_report_data = {
-	.attr = {
-		.name = "f54_report_data",
-		.mode = S_IRUGO
-	},
-	.size = 0,
-	.read = rmi_f54_report_data_read,
-};
 
 static ssize_t rmi_f54_query_data_read(struct file *data_file,
                                        struct kobject *kobj,
@@ -800,6 +733,294 @@ static int rmi_f54_get_report_size(struct f54_data *f54)
 
 	return size;
 }
+
+static const struct v4l2_file_operations rmi_f54_video_fops = {
+	.owner = THIS_MODULE,
+	.open = v4l2_fh_open,
+	.release = vb2_fop_release,
+	.unlocked_ioctl = video_ioctl2,
+	.read = vb2_fop_read,
+	.mmap = vb2_fop_mmap,
+	.poll = vb2_fop_poll,
+};
+
+struct rmi_f54_vb2_buffer {
+	struct vb2_buffer       vb;
+	struct list_head        list;
+};
+
+static int rmi_f54_queue_setup(struct vb2_queue *q,
+                       unsigned int *nbuffers, unsigned int *nplanes,
+                       unsigned int sizes[], void *alloc_ctxs[])
+{
+        struct f54_data *f54 = q->drv_priv;
+
+        *nbuffers = 1;
+        *nplanes = 1;
+        sizes[0] = rmi_f54_get_report_size(f54);
+
+        return 0;
+}
+
+static int rmi_f54_buffer_prepare(struct vb2_buffer *vb)
+{
+        return 0;
+}
+
+static void rmi_f54_buffer_queue(struct vb2_buffer *vb)
+{
+        struct f54_data *f54 = vb2_get_drv_priv(vb->vb2_queue);
+        u16 *ptr;
+	enum vb2_buffer_state state;
+	enum f54_report_type reptype;
+	int ret;
+
+	mutex_lock(&f54->periodic_mutex);
+	mutex_lock(&f54->status_mutex);
+
+	reptype = rmi_f54_get_reptype(f54, f54->input);
+	if (reptype == F54_REPORT_NONE) {
+		state = VB2_BUF_STATE_ERROR;
+		goto done;
+	}
+
+	if (f54->is_busy) {
+		state = VB2_BUF_STATE_ERROR;
+		goto done;
+	}
+
+	ret = rmi_f54_request_report(f54->fn, reptype);
+	if (ret) {
+		dev_err(&f54->fn->dev, "Error requesting F54 report\n");
+		state = VB2_BUF_STATE_ERROR;
+		goto done;
+	}
+
+	/* get frame data */
+	mutex_lock(&f54->data_mutex);
+
+	while (f54->is_busy) {
+		mutex_unlock(&f54->data_mutex);
+		if (!wait_for_completion_timeout(&f54->cmd_done,
+						 msecs_to_jiffies(1000))) {
+			dev_err(&f54->fn->dev, "Timed out\n");
+			state = VB2_BUF_STATE_ERROR;
+			goto done;
+		}
+		mutex_lock(&f54->data_mutex);
+	}
+
+	ptr = vb2_plane_vaddr(vb, 0);
+	if (!ptr) {
+		dev_err(&f54->fn->dev, "Error acquiring frame ptr\n");
+		state = VB2_BUF_STATE_ERROR;
+		goto data_done;
+	}
+
+	memcpy(ptr, f54->report_data, f54->report_size);
+	vb2_set_plane_payload(vb, 0, rmi_f54_get_report_size(f54));
+	state = VB2_BUF_STATE_DONE;
+
+data_done:
+	mutex_unlock(&f54->data_mutex);
+done:
+	vb2_buffer_done(vb, state);
+	mutex_unlock(&f54->status_mutex);
+	mutex_unlock(&f54->periodic_mutex);
+}
+
+/* V4L2 structures */
+static const struct vb2_ops rmi_f54_queue_ops = {
+	.queue_setup            = rmi_f54_queue_setup,
+	.buf_prepare            = rmi_f54_buffer_prepare,
+	.buf_queue              = rmi_f54_buffer_queue,
+	.wait_prepare           = vb2_ops_wait_prepare,
+	.wait_finish            = vb2_ops_wait_finish,
+};
+
+static const struct vb2_queue rmi_f54_queue = {
+	.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+	.io_modes = VB2_MMAP,
+	.buf_struct_size = sizeof(struct rmi_f54_vb2_buffer),
+	.ops = &rmi_f54_queue_ops,
+	.mem_ops = &vb2_vmalloc_memops,
+	.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC,
+	.min_buffers_needed = 1,
+};
+
+static int rmi_f54_vidioc_querycap(struct file *file, void *priv,
+                                 struct v4l2_capability *cap)
+{
+	struct f54_data *f54 = video_drvdata(file);
+
+	strlcpy(cap->driver, F54_NAME, sizeof(cap->driver));
+	strlcpy(cap->card, SYNAPTICS_INPUT_DEVICE_NAME, sizeof(cap->card));
+	strlcpy(cap->bus_info, dev_name(&f54->fn->dev), sizeof(cap->bus_info));
+	cap->device_caps = V4L2_CAP_VIDEO_CAPTURE |
+		V4L2_CAP_READWRITE | V4L2_CAP_STREAMING;
+	cap->capabilities = cap->device_caps | V4L2_CAP_DEVICE_CAPS;
+
+	return 0;
+}
+
+static const char *rmi_f54_reptype_str(enum f54_report_type reptype)
+{
+	switch (reptype) {
+	default:
+	case F54_REPORT_NONE: return "No report";
+	case F54_8BIT_IMAGE: return "8 bit image";
+	case F54_16BIT_IMAGE: return "16 bit image";
+	case F54_RAW_16BIT_IMAGE: return "Raw 16 bit image";
+	case F54_HIGH_RESISTANCE: return "High resistance";
+	case F54_TX_TO_TX_SHORT: return "TX to TX short";
+	case F54_RX_TO_RX1: return "RX to RX1";
+	case F54_TRUE_BASELINE: return "True baseline";
+	case F54_FULL_RAW_CAP_MIN_MAX: return "Full raw cap min max";
+	case F54_RX_OPENS1: return "RX open S1";
+	case F54_TX_OPEN: return "TX open";
+	case F54_TX_TO_GROUND: return "TX to ground";
+	case F54_RX_TO_RX2: return "RX to RX2";
+	case F54_RX_OPENS2: return "RX Open S2";
+	case F54_FULL_RAW_CAP: return "Full raw cap";
+	case F54_FULL_RAW_CAP_RX_COUPLING_COMP:
+			       return "Full raw cap RX coupling comp";
+	case F54_MAX_REPORT_TYPE: return "Max report type";
+	}
+}
+
+static int rmi_f54_vidioc_enum_input(struct file *file, void *priv,
+                                   struct v4l2_input *i)
+{
+	struct f54_data *f54 = video_drvdata(file);
+	enum f54_report_type reptype;
+
+	reptype = rmi_f54_get_reptype(f54, i->index);
+	if (reptype == F54_REPORT_NONE)
+		return -EINVAL;
+
+	i->type = V4L2_INPUT_TYPE_CAMERA;
+	i->std = V4L2_STD_UNKNOWN;
+	i->capabilities = 0;
+	strlcpy(i->name, rmi_f54_reptype_str(reptype), sizeof(i->name));
+	return 0;
+}
+
+static int rmi_f54_set_input(struct f54_data *f54, unsigned int i)
+{
+	struct v4l2_pix_format *f = &f54->format;
+	enum f54_report_type reptype;
+
+	reptype = rmi_f54_get_reptype(f54, i);
+	if (reptype == F54_REPORT_NONE)
+		return -EINVAL;
+
+	f54->input = i;
+
+	f->width = f54->qry.num_rx_electrodes;
+	f->height = f54->qry.num_tx_electrodes;
+	f->pixelformat = V4L2_PIX_FMT_YS16;
+	f->field = V4L2_FIELD_NONE;
+	f->colorspace = V4L2_COLORSPACE_SRGB;
+	f->bytesperline = f->width * sizeof(u16);
+	f->sizeimage = f->width * f->height * sizeof(u16);
+
+	return 0;
+}
+
+static int rmi_f54_vidioc_s_input(struct file *file, void *priv, unsigned int i)
+{
+	return rmi_f54_set_input(video_drvdata(file), i);
+}
+
+static int rmi_f54_vidioc_g_input(struct file *file, void *priv,
+				  unsigned int *i)
+{
+	struct f54_data *f54 = video_drvdata(file);
+
+	*i = f54->input;
+
+	return 0;
+}
+
+static int rmi_f54_vidioc_fmt(struct file *file, void *priv, struct v4l2_format *f)
+{
+	struct f54_data *f54 = video_drvdata(file);
+
+	f->fmt.pix = f54->format;
+
+	return 0;
+}
+
+static int rmi_f54_vidioc_enum_fmt(struct file *file, void *priv,
+                                 struct v4l2_fmtdesc *fmt)
+{
+	if (fmt->index > 0 || fmt->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+		return -EINVAL;
+
+	fmt->pixelformat = V4L2_PIX_FMT_YS16;
+	strlcpy(fmt->description, "16-bit raw debug data",
+			sizeof(fmt->description));
+	fmt->flags = 0;
+	return 0;
+}
+
+static int rmi_f54_vidioc_enum_framesizes(struct file *file, void *priv,
+                                        struct v4l2_frmsizeenum *f)
+{
+	struct f54_data *f54 = video_drvdata(file);
+
+	if (f->index > 0)
+		return -EINVAL;
+
+	f->discrete.width = f54->qry.num_rx_electrodes;
+	f->discrete.height = f54->qry.num_tx_electrodes;
+	f->type = V4L2_FRMSIZE_TYPE_DISCRETE;
+	return 0;
+}
+
+static int rmi_f54_vidioc_enum_frameintervals(struct file *file, void *priv,
+                                          struct v4l2_frmivalenum *f)
+{
+	if ((f->index > 0) || (f->pixel_format != V4L2_PIX_FMT_YS16))
+		return -EINVAL;
+
+	f->type = V4L2_FRMIVAL_TYPE_DISCRETE;
+	f->discrete.denominator  = 10;
+	f->discrete.numerator = 1;
+	return 0;
+}
+
+static const struct v4l2_ioctl_ops rmi_f54_video_ioctl_ops = {
+	.vidioc_querycap        = rmi_f54_vidioc_querycap,
+
+	.vidioc_enum_fmt_vid_cap = rmi_f54_vidioc_enum_fmt,
+	.vidioc_s_fmt_vid_cap   = rmi_f54_vidioc_fmt,
+	.vidioc_g_fmt_vid_cap   = rmi_f54_vidioc_fmt,
+
+	.vidioc_enum_framesizes = rmi_f54_vidioc_enum_framesizes,
+	.vidioc_enum_frameintervals = rmi_f54_vidioc_enum_frameintervals,
+
+	.vidioc_enum_input      = rmi_f54_vidioc_enum_input,
+	.vidioc_g_input         = rmi_f54_vidioc_g_input,
+	.vidioc_s_input         = rmi_f54_vidioc_s_input,
+
+	.vidioc_reqbufs         = vb2_ioctl_reqbufs,
+	.vidioc_create_bufs     = vb2_ioctl_create_bufs,
+	.vidioc_querybuf        = vb2_ioctl_querybuf,
+	.vidioc_qbuf            = vb2_ioctl_qbuf,
+	.vidioc_dqbuf           = vb2_ioctl_dqbuf,
+	.vidioc_expbuf          = vb2_ioctl_expbuf,
+
+	.vidioc_streamon        = vb2_ioctl_streamon,
+	.vidioc_streamoff       = vb2_ioctl_streamoff,
+};
+
+static const struct video_device rmi_f54_video_device = {
+	.name = "Synaptics RMI4",
+	.fops = &rmi_f54_video_fops,
+	.ioctl_ops = &rmi_f54_video_ioctl_ops,
+	.release = video_device_release_empty,
+};
 
 /*
  *  rmi4_f54_periodic_work()
@@ -1000,7 +1221,6 @@ static int rmi_f54_attention(struct rmi_function *fn, unsigned long *irqbits)
 }
 
 static struct attribute *rmi_f54_attrs[] = {
-	&dev_attr_f54_report_type.attr,
 	&dev_attr_f54_control_addr.attr,
 	&dev_attr_f54_control_data.attr,
 	&dev_attr_f54_data_addr.attr,
@@ -1097,13 +1317,9 @@ static int rmi_f54_probe(struct rmi_function *fn)
 		goto remove_wq;
 	}
 
-	ret = sysfs_create_bin_file(&fn->dev.kobj, &f54_report_data);
-	if (ret < 0)
-		goto remove_periodic;
-
 	ret = sysfs_create_bin_file(&fn->dev.kobj, &f54_query_data);
 	if (ret < 0)
-		goto remove_report;
+		goto remove_periodic;
 
 	ret = sysfs_create_bin_file(&fn->dev.kobj, &f54_control_data);
 	if (ret < 0)
@@ -1113,18 +1329,51 @@ static int rmi_f54_probe(struct rmi_function *fn)
 	if (ret)
 		goto remove_control;
 
+	rmi_f54_create_input_map(f54);
+
+        /* register video device */
+        strlcpy(f54->v4l2.name, F54_NAME, sizeof(f54->v4l2.name));
+        ret = v4l2_device_register(&fn->dev, &f54->v4l2);
+        if (ret) {
+                dev_err(&fn->dev, "Unable to register video dev.\n");
+                goto remove_control;
+        }
+
+        /* initialize the queue */
+        mutex_init(&f54->lock);
+        f54->queue = rmi_f54_queue;
+        f54->queue.drv_priv = f54;
+        f54->queue.lock = &f54->lock;
+
+        ret = vb2_queue_init(&f54->queue);
+        if (ret)
+                goto remove_v4l2;
+
+        f54->vdev = rmi_f54_video_device;
+        f54->vdev.v4l2_dev = &f54->v4l2;
+        f54->vdev.lock = &f54->lock;
+        f54->vdev.vfl_dir = VFL_DIR_RX;
+        f54->vdev.queue = &f54->queue;
+        video_set_drvdata(&f54->vdev, f54);
+
+        ret = video_register_device(&f54->vdev, VFL_TYPE_TOUCH_SENSOR, -1);
+        if (ret) {
+                dev_err(&fn->dev, "Unable to register video subdevice.");
+                goto remove_v4l2;
+        }
+
 	if (f54->worker_period)
 		queue_delayed_work(f54->periodic, &f54->periodic_work,
 		                   msecs_to_jiffies(f54->worker_period * 1000));
 
 	return 0;
 
+remove_v4l2:
+	v4l2_device_unregister(&f54->v4l2);
 remove_control:
 	sysfs_remove_bin_file(&fn->dev.kobj, &f54_control_data);
 remove_query:
 	sysfs_remove_bin_file(&fn->dev.kobj, &f54_query_data);
-remove_report:
-	sysfs_remove_bin_file(&fn->dev.kobj, &f54_report_data);
 remove_periodic:
 	cancel_delayed_work_sync(&f54->periodic_work);
 	flush_workqueue(f54->periodic);
@@ -1138,9 +1387,13 @@ remove_wq:
 
 static void rmi_f54_remove(struct rmi_function *fn)
 {
+	struct f54_data *f54 = dev_get_drvdata(&fn->dev);
+
+	video_unregister_device(&f54->vdev);
+	v4l2_device_unregister(&f54->v4l2);
+
 	sysfs_remove_group(&fn->dev.kobj, &rmi_f54_attr_group);
 	sysfs_remove_bin_file(&fn->dev.kobj, &f54_control_data);
-	sysfs_remove_bin_file(&fn->dev.kobj, &f54_report_data);
 	sysfs_remove_bin_file(&fn->dev.kobj, &f54_query_data);
 }
 
