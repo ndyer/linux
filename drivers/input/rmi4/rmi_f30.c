@@ -336,7 +336,7 @@ static inline int rmi_f30_initialize(struct rmi_function *fn)
 	retval = rmi_f30_read_control_parameters(fn, f30);
 	if (retval < 0) {
 		dev_err(&fn->dev,
-			"Failed to initialize F19 control params.\n");
+			"Failed to initialize F30 control params.\n");
 		return retval;
 	}
 
