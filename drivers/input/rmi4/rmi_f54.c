@@ -16,6 +16,10 @@
 
 #define F54_NAME		"rmi4_f54"
 
+#define F54_PERIODIC_SIZE       16
+#define F54_PERIODIC_TIME       2       /* periodic timer, in seconds */
+#define F54_RECAL_LIMIT         60      /* default recalibration limit */
+
 /* F54 data offsets */
 #define F54_REPORT_DATA_OFFSET  3
 #define F54_FIFO_OFFSET         1
@@ -160,6 +164,19 @@ struct f54_data {
 	unsigned long timeout;
 
 	struct completion cmd_done;
+
+	/* periodic activity */
+	struct mutex periodic_mutex; /* hold while periodic report pending */
+
+	struct workqueue_struct *periodic;
+	struct delayed_work periodic_work;
+
+	bool is_periodic;	/* true while executing periodic report */
+	u8 periodic_data[F54_PERIODIC_SIZE];
+	int periodic_size;
+
+	int worker_period;	/* rate of periodic activity, in seconds */
+	int recal_limit;	/* limit to trigger recalibration */
 
 	/* Data used for debugging */
 	u8 control_addr;
@@ -559,6 +576,8 @@ static ssize_t rmi_f54_report_type_store(struct device *dev,
 		return -EINVAL;
 	}
 
+	mutex_lock(&f54->periodic_mutex);
+
 	mutex_lock(&f54->status_mutex);
 	if (f54->is_busy) {
 		error = -EBUSY;
@@ -575,12 +594,83 @@ static ssize_t rmi_f54_report_type_store(struct device *dev,
 	}
 error:
 	mutex_unlock(&f54->status_mutex);
+	mutex_unlock(&f54->periodic_mutex);
+
 	return error < 0 ? error : count;
 }
 
 static DEVICE_ATTR(f54_report_type, S_IRUGO | S_IWUSR,
                    rmi_f54_report_type_show, rmi_f54_report_type_store);
 
+static ssize_t rmi_f54_recal_period_show(struct device *dev,
+                                         struct device_attribute *attr,
+                                         char *buf)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", f54->worker_period);
+}
+
+static ssize_t rmi_f54_recal_period_store(struct device *dev,
+                                          struct device_attribute *attr,
+                                          const char *buf, size_t count)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	unsigned long val;
+
+	if (kstrtoul(buf, 0, &val))
+		return -EINVAL;
+
+	if (val > 255)
+		return -EINVAL;
+
+	mutex_lock(&f54->periodic_mutex);
+	f54->worker_period = val;
+
+	cancel_delayed_work_sync(&f54->periodic_work);
+	if (f54->worker_period)
+		queue_delayed_work(f54->periodic, &f54->periodic_work,
+		                   msecs_to_jiffies(f54->worker_period * 1000));
+
+	mutex_unlock(&f54->periodic_mutex);
+
+	return count;
+}
+
+static DEVICE_ATTR(f54_recal_period, S_IRUGO | S_IWUSR,
+                   rmi_f54_recal_period_show, rmi_f54_recal_period_store);
+
+static ssize_t rmi_f54_recal_limit_show(struct device *dev,
+                                        struct device_attribute *attr,
+                                        char *buf)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", f54->recal_limit);
+}
+
+static ssize_t rmi_f54_recal_limit_store(struct device *dev,
+                                         struct device_attribute *attr,
+                                         const char *buf, size_t count)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	unsigned long val;
+
+	if (kstrtoul(buf, 0, &val))
+		return -EINVAL;
+
+	if (val > 65535)
+		return -EINVAL;
+
+	f54->recal_limit = val;
+
+	return count;
+}
+
+static DEVICE_ATTR(f54_recal_limit, S_IRUGO | S_IWUSR,
+                   rmi_f54_recal_limit_show, rmi_f54_recal_limit_store);
+
+/* Provide access to last non-periodic report */
 static ssize_t rmi_f54_report_data_read(struct file *data_file,
                                         struct kobject *kobj,
                                         struct bin_attribute *attr,
@@ -593,6 +683,7 @@ static ssize_t rmi_f54_report_data_read(struct file *data_file,
 	if (count == 0)
 		return 0;
 
+	mutex_lock(&f54->periodic_mutex);
 	mutex_lock(&f54->data_mutex);
 
 	while (f54->is_busy) {
@@ -617,6 +708,8 @@ static ssize_t rmi_f54_report_data_read(struct file *data_file,
 	ret = count;
 done:
 	mutex_unlock(&f54->data_mutex);
+	mutex_unlock(&f54->periodic_mutex);
+
 	return ret;
 }
 
@@ -708,9 +801,94 @@ static int rmi_f54_get_report_size(struct f54_data *f54)
 	return size;
 }
 
+/*
+ *  rmi4_f54_periodic_work()
+ */
+static void rmi_f54_periodic_work(struct work_struct *work)
+{
+	struct f54_data *f54 =
+	        container_of(work, struct f54_data,
+	                     periodic_work.work);
+	int error, i, sum;
+	s16 *data;
+
+	mutex_lock(&f54->periodic_mutex);
+	f54->is_periodic = true;
+
+	mutex_lock(&f54->status_mutex);
+	if (f54->is_busy) {
+		mutex_unlock(&f54->status_mutex);
+		goto reschedule;
+	}
+
+	error = rmi_f54_request_report(f54->fn, F54_16BIT_IMAGE);
+	if (error) {
+		mutex_unlock(&f54->status_mutex);
+		goto reschedule;
+	}
+	mutex_unlock(&f54->status_mutex);
+
+	/* Now wait for results */
+
+	mutex_lock(&f54->data_mutex);
+
+	while (f54->is_busy) {
+		mutex_unlock(&f54->data_mutex);
+		/*
+		 * If we did not receive a response within 200 ms,
+		 * just try again later.
+		 */
+		if (!wait_for_completion_timeout(&f54->cmd_done,
+		                                 msecs_to_jiffies(200))) {
+			goto reschedule;
+		}
+		mutex_lock(&f54->data_mutex);
+	}
+	if (f54->periodic_size == 0)
+		goto data_done;
+
+	data = (s16 *)f54->periodic_data;
+	sum = 0;
+	for (i = 0; i < F54_PERIODIC_SIZE / 2; i++)
+		sum += data[i];
+
+
+	rmi_dbg(RMI_DEBUG_FN, &f54->fn->dev, "calibration data sum: %d\n", sum);
+	if (sum > f54->recal_limit) {
+		dev_info(&f54->fn->dev, "Touchscreen watchdog sum = %d Forcing recalibration.\n", sum);
+		error = rmi_write(f54->fn->rmi_dev,
+		                  f54->fn->fd.command_base_addr,
+		                  F54_FORCE_CAL);
+	}
+
+data_done:
+	mutex_unlock(&f54->data_mutex);
+reschedule:
+	queue_delayed_work(f54->periodic, &f54->periodic_work,
+	                   msecs_to_jiffies(f54->worker_period * 1000));
+	f54->is_periodic = false;
+	mutex_unlock(&f54->periodic_mutex);
+}
+
 struct rmi_f54_reports {
 	int start;
 	int size;
+};
+
+static struct rmi_f54_reports rmi_f54_periodic_report_24[] = {
+	{ 0   * 2, 4 },         /* four bytes each from four corners */
+	{ 37  * 2, 4 },
+	{ 896 * 2, 4 },
+	{ 934 * 2, 4 },         /* This must be the last two blocks in the 936 block buffer */
+	{ 0, 0 },
+};
+
+static struct rmi_f54_reports rmi_f54_periodic_report_30[] = {
+	{ 0    * 2, 4 },        /* four bytes each from four corners */
+	{ 44   * 2, 4 },
+	{ 1421 * 2, 4 },
+	{ 1378 * 2, 4 },        /* This must be the last two blocks in the 1380 block buffer */
+	{ 0, 0 },
 };
 
 static struct rmi_f54_reports rmi_f54_standard_report[] = {
@@ -729,16 +907,25 @@ static void rmi_f54_work(struct work_struct *work)
 	u8 *data;
 	int error;
 
-	data = f54->report_data;
-	report_size = rmi_f54_get_report_size(f54);
-	if (report_size == 0) {
-		dev_err(&fn->dev, "Bad report size, report type=%d\n",
-				f54->report_type);
-		error = -EINVAL;
-		goto error;     /* retry won't help */
+	if (f54->is_periodic) {
+		data = f54->periodic_data;
+		if (f54->qry.num_tx_electrodes <= 24)
+			report = rmi_f54_periodic_report_24;
+		else
+			report = rmi_f54_periodic_report_30;
+	} else {
+
+		data = f54->report_data;
+		report_size = rmi_f54_get_report_size(f54);
+		if (report_size == 0) {
+			dev_err(&fn->dev, "Bad report size, report type=%d\n",
+			        f54->report_type);
+			error = -EINVAL;
+			goto error;     /* retry won't help */
+		}
+		rmi_f54_standard_report[0].size = report_size;
+		report = rmi_f54_standard_report;
 	}
-	rmi_f54_standard_report[0].size = report_size;
-	report = rmi_f54_standard_report;
 
 	mutex_lock(&f54->data_mutex);
 
@@ -788,7 +975,10 @@ static void rmi_f54_work(struct work_struct *work)
 	}
 
 abort:
-	f54->report_size = error ? 0 : report_size;
+	if (!f54->is_periodic)
+		f54->report_size = error ? 0 : report_size;
+	else
+		f54->periodic_size = error ? 0 : report_size;
 error:
 	if (error)
 		report_size = 0;
@@ -816,6 +1006,8 @@ static struct attribute *rmi_f54_attrs[] = {
 	&dev_attr_f54_data_addr.attr,
 	&dev_attr_f54_data_data.attr,
 	&dev_attr_f54_command.attr,
+	&dev_attr_f54_recal_period.attr,
+	&dev_attr_f54_recal_limit.attr,
 	NULL
 };
 
@@ -879,6 +1071,7 @@ static int rmi_f54_probe(struct rmi_function *fn)
 
 	mutex_init(&f54->data_mutex);
 	mutex_init(&f54->status_mutex);
+	mutex_init(&f54->periodic_mutex);
 
 	rx = f54->qry.num_rx_electrodes;
 	tx = f54->qry.num_tx_electrodes;
@@ -889,14 +1082,24 @@ static int rmi_f54_probe(struct rmi_function *fn)
 		return -ENOMEM;
 
 	INIT_DELAYED_WORK(&f54->work, rmi_f54_work);
+	INIT_DELAYED_WORK(&f54->periodic_work, rmi_f54_periodic_work);
+
+	f54->worker_period = F54_PERIODIC_TIME;
+	f54->recal_limit = F54_RECAL_LIMIT;
 
 	f54->workqueue = create_singlethread_workqueue("rmi4-poller");
 	if (!f54->workqueue)
 		return -ENOMEM;
 
+	f54->periodic = create_singlethread_workqueue("rmi4-periodic");
+	if (!f54->periodic) {
+		ret = -ENOMEM;
+		goto remove_wq;
+	}
+
 	ret = sysfs_create_bin_file(&fn->dev.kobj, &f54_report_data);
 	if (ret < 0)
-		goto remove_wq;
+		goto remove_periodic;
 
 	ret = sysfs_create_bin_file(&fn->dev.kobj, &f54_query_data);
 	if (ret < 0)
@@ -910,6 +1113,10 @@ static int rmi_f54_probe(struct rmi_function *fn)
 	if (ret)
 		goto remove_control;
 
+	if (f54->worker_period)
+		queue_delayed_work(f54->periodic, &f54->periodic_work,
+		                   msecs_to_jiffies(f54->worker_period * 1000));
+
 	return 0;
 
 remove_control:
@@ -918,6 +1125,10 @@ remove_query:
 	sysfs_remove_bin_file(&fn->dev.kobj, &f54_query_data);
 remove_report:
 	sysfs_remove_bin_file(&fn->dev.kobj, &f54_report_data);
+remove_periodic:
+	cancel_delayed_work_sync(&f54->periodic_work);
+	flush_workqueue(f54->periodic);
+	destroy_workqueue(f54->periodic);
 remove_wq:
 	cancel_delayed_work_sync(&f54->work);
 	flush_workqueue(f54->workqueue);
