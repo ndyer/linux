@@ -86,6 +86,10 @@ struct f54_data {
 
 	struct completion cmd_done;
 
+	/* Data used for debugging */
+	u8 control_addr;
+	u8 data_addr;
+
 	/* V4L2 support */
 	struct v4l2_device v4l2;
 	struct v4l2_pix_format format;
@@ -191,6 +195,427 @@ static int rmi_f54_request_report(struct rmi_function *fn, u8 report_type)
 
 	return 0;
 }
+
+static ssize_t rmi_f54_control_addr_show(struct device *dev,
+					 struct device_attribute *attr,
+					 char *buf)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+
+	return snprintf(buf, PAGE_SIZE, "0x%02x\n", f54->control_addr);
+}
+
+static u8 f54_control_reg_size[107] = {
+	1, 1, 2, 1, 1, 1, 1, 1, 2, 1, 1, 2, 1, 1, 1, 0,
+	0, 0, 0, 0, 1, 2, 1, 2, 2, 1, 1, 1, 2, 1, 1, 1,
+	1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 2, 2, 1, 1, 1, 1,
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 8, 2, 1, 1, 1, 1,
+	1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1,
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+};
+
+static ssize_t rmi_f54_control_addr_store(struct device *dev,
+					  struct device_attribute *attr,
+					  const char *buf, size_t count)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	unsigned long val;
+
+	if (kstrtoul(buf, 0, &val))
+		return -EINVAL;
+
+	if (val >= ARRAY_SIZE(f54_control_reg_size))
+		return -EINVAL;
+
+	f54->control_addr = val;
+
+	return count;
+}
+
+static DEVICE_ATTR(f54_control_addr, S_IRUGO | S_IWUSR,
+		   rmi_f54_control_addr_show, rmi_f54_control_addr_store);
+
+static ssize_t rmi_f54_control_data_show(struct device *dev,
+					 struct device_attribute *attr,
+					 char *buf)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	u8 data;
+	int error;
+
+	error = rmi_read(f54->fn->rmi_dev,
+			 f54->fn->fd.control_base_addr + f54->control_addr,
+			 &data);
+	if (error)
+		return error;
+
+	return snprintf(buf, PAGE_SIZE, "0x%02x\n", data);
+}
+
+static ssize_t rmi_f54_control_data_store(struct device *dev,
+					  struct device_attribute *attr,
+					  const char *buf, size_t count)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	unsigned long val;
+	int error;
+
+	if (kstrtoul(buf, 0, &val))
+		return -EINVAL;
+
+	if (val > 255)
+		return -EINVAL;
+
+	error = rmi_write(f54->fn->rmi_dev,
+			  f54->fn->fd.control_base_addr + f54->control_addr,
+			  val);
+	return error ? : count;
+}
+
+static DEVICE_ATTR(f54_control_data, S_IRUGO | S_IWUSR,
+		   rmi_f54_control_data_show, rmi_f54_control_data_store);
+
+static int f54_get_control_reg_size(struct f54_data *f54, int reg)
+{
+	if (reg < 0 || reg >= ARRAY_SIZE(f54_control_reg_size))
+		return 0;
+
+	switch (reg) {
+	case 15:
+		return f54->num_rx_electrodes;
+	case 16:
+		return f54->num_tx_electrodes;
+	case 17:
+	case 18:
+	case 19:
+	case 38:
+	case 39:
+	case 40:
+	case 75:
+		return f54->qry[13] & 0x0f;
+	case 36:
+		switch (f54->qry[8] & 0x03) {
+		case 0x01:
+			return max(f54->num_tx_electrodes,
+				   f54->num_rx_electrodes);
+		case 0x02:
+			return f54->num_rx_electrodes;
+		}
+		return 0;
+	case 37:
+		if ((f54->qry[8] & 0x03) == 0x02)
+			return f54->num_rx_electrodes;
+		return 0;
+	case 64:
+		return 7;       /* or 1 */
+	case 87:
+		return 13;
+	case 89:
+		return 11;
+	case 91:
+		return 5;
+	case 93:
+		return 2;
+	case 94:
+		return 4;
+	case 95:
+		return 11 * (f54->qry[13] & 0x0f);
+	case 96:
+		return f54->num_rx_electrodes;
+	case 97:
+		return f54->num_rx_electrodes + f54->num_tx_electrodes;
+	case 98:
+		return 10;
+	case 99:
+		if (f54->family == 2)
+			return 3;
+		return 0;
+	case 101:
+		return 5;
+	case 102:
+		return 28;
+	case 103:
+		return 0;
+	case 104:
+		return 8;
+	default:
+		break;
+	}
+	return f54_control_reg_size[reg];
+}
+
+static ssize_t rmi_f54_control_data_read(struct file *data_file,
+					 struct kobject *kobj,
+					 struct bin_attribute *attr,
+					 char *buf, loff_t pos, size_t count)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	size_t fsize = f54_get_control_reg_size(f54, f54->control_addr);
+	int error;
+
+	if (count == 0)
+		return 0;
+
+	if (pos > fsize)
+		return -EFBIG;
+
+	if (pos + count > fsize)
+		count = fsize - pos;
+
+	if (count == 0)
+		return count;
+
+	error = rmi_read_block(f54->fn->rmi_dev,
+			       f54->fn->fd.control_base_addr +
+			       f54->control_addr, buf, count);
+	if (error < 0)
+		return error;
+	return count;
+}
+
+static struct bin_attribute f54_control_data = {
+	.attr = {
+		.name = "f54_control_data_bin",
+		.mode = S_IRUGO
+	},
+	.size = 0,
+	.read = rmi_f54_control_data_read,
+};
+
+static ssize_t rmi_f54_data_addr_show(struct device *dev,
+				      struct device_attribute *attr,
+				      char *buf)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+
+	return snprintf(buf, PAGE_SIZE, "0x%02x\n", f54->data_addr);
+}
+
+static ssize_t rmi_f54_data_addr_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	unsigned long val;
+
+	if (kstrtoul(buf, 0, &val))
+		return -EINVAL;
+
+	if (val > 19 + 6)
+		return -EINVAL;
+
+	f54->data_addr = val;
+
+	return count;
+}
+
+static DEVICE_ATTR(f54_data_addr, S_IRUGO | S_IWUSR,
+		   rmi_f54_data_addr_show, rmi_f54_data_addr_store);
+
+static ssize_t rmi_f54_data_data_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	u8 data;
+	int error;
+
+	error = rmi_read(f54->fn->rmi_dev,
+			 f54->fn->fd.data_base_addr + f54->data_addr,
+			 &data);
+	if (error)
+		return error;
+
+	return snprintf(buf, PAGE_SIZE, "0x%02x\n", data);
+}
+
+static ssize_t rmi_f54_data_data_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	unsigned long val;
+	int error;
+
+	if (kstrtoul(buf, 0, &val))
+		return -EINVAL;
+
+	if (val > 255)
+		return -EINVAL;
+
+	error = rmi_write(f54->fn->rmi_dev,
+			  f54->fn->fd.data_base_addr + f54->data_addr, val);
+	return error ? : count;
+}
+
+static DEVICE_ATTR(f54_data_data, S_IRUGO | S_IWUSR,
+		   rmi_f54_data_data_show, rmi_f54_data_data_store);
+
+static ssize_t rmi_f54_command_show(struct device *dev,
+				    struct device_attribute *attr,
+				    char *buf)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	u8 data;
+	int error;
+
+	error = rmi_read(f54->fn->rmi_dev,
+			 f54->fn->fd.command_base_addr, &data);
+	if (error)
+		return error;
+
+	return snprintf(buf, PAGE_SIZE, "0x%02x\n", data);
+}
+
+static ssize_t rmi_f54_command_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	unsigned long val;
+	int error;
+
+	if (kstrtoul(buf, 0, &val))
+		return -EINVAL;
+
+	if (val > 255)
+		return -EINVAL;
+
+	error = rmi_write(f54->fn->rmi_dev,
+			  f54->fn->fd.command_base_addr, val);
+	return error ? : count;
+}
+
+static DEVICE_ATTR(f54_command, S_IRUGO | S_IWUSR,
+		   rmi_f54_command_show, rmi_f54_command_store);
+
+static ssize_t rmi_f54_report_type_show(struct device *dev,
+					struct device_attribute *attr,
+					char *buf)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+
+	return snprintf(buf, PAGE_SIZE, "%u\n", f54->report_type);
+}
+
+static ssize_t rmi_f54_report_type_store(struct device *dev,
+					 struct device_attribute *attr,
+					 const char *buf, size_t count)
+{
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	unsigned long val;
+	int error = 0;
+
+	if (kstrtoul(buf, 0, &val)) {
+		dev_err(dev, "Not a digit\n");
+		return -EINVAL;
+	}
+
+	if (val && !is_f54_report_type_valid(f54, val)) {
+		dev_err(dev, "F54 report type %lu not valid\n", val);
+		return -EINVAL;
+	}
+
+	mutex_lock(&f54->status_mutex);
+	if (f54->is_busy) {
+		error = -EBUSY;
+		goto error;
+	}
+
+	if (val == 0) {
+		f54->report_type = 0;
+	} else {
+		error = rmi_f54_request_report(f54->fn, val);
+		if (error)
+			dev_err(dev, "Error requesting F54 report %lu\n", val);
+
+	}
+error:
+	mutex_unlock(&f54->status_mutex);
+	return error < 0 ? error : count;
+}
+
+static DEVICE_ATTR(f54_report_type, S_IRUGO | S_IWUSR,
+		   rmi_f54_report_type_show, rmi_f54_report_type_store);
+
+static ssize_t rmi_f54_report_data_read(struct file *data_file,
+					struct kobject *kobj,
+					struct bin_attribute *attr,
+					char *buf, loff_t pos, size_t count)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+	struct f54_data *f54 = dev_get_drvdata(dev);
+	ssize_t ret;
+
+	if (count == 0)
+		return 0;
+
+	mutex_lock(&f54->data_mutex);
+
+	while (f54->is_busy) {
+		mutex_unlock(&f54->data_mutex);
+		/*
+		 * transfer can take a long time, so wait for up to one second
+		 */
+		if (!wait_for_completion_timeout(&f54->cmd_done,
+						 msecs_to_jiffies(1000)))
+			return -ETIMEDOUT;
+		mutex_lock(&f54->data_mutex);
+	}
+	if (f54->report_size == 0) {
+		ret = -ENODATA;
+		goto done;
+	}
+
+	if (pos + count > f54->report_size)
+		count = f54->report_size - pos;
+
+	memcpy(buf, f54->report_data + pos, count);
+	ret = count;
+done:
+	mutex_unlock(&f54->data_mutex);
+	return ret;
+}
+
+static struct bin_attribute f54_report_data = {
+	.attr = {
+		.name = "f54_report_data",
+		.mode = S_IRUGO
+	},
+	.size = 0,
+	.read = rmi_f54_report_data_read,
+};
+
+static ssize_t rmi_f54_query_data_read(struct file *data_file,
+				       struct kobject *kobj,
+				       struct bin_attribute *attr,
+				       char *buf, loff_t pos, size_t count)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+	struct f54_data *f54 = dev_get_drvdata(dev);
+
+	if (count == 0)
+		return 0;
+
+	if (pos > sizeof(f54->qry))
+		return -EFBIG;
+
+	if (pos + count > sizeof(f54->qry))
+		count = sizeof(f54->qry) - pos;
+
+	memcpy(buf, &f54->qry + pos, count);
+	return count;
+}
+
+static struct bin_attribute f54_query_data = {
+	.attr = {
+		.name = "f54_query_data",
+		.mode = S_IRUGO
+	},
+	.size = 0,
+	.read = rmi_f54_query_data_read,
+};
 
 static int rmi_f54_get_report_size(struct f54_data *f54)
 {
@@ -599,6 +1024,20 @@ static int rmi_f54_attention(struct rmi_function *fn, unsigned long *irqbits)
 	return 0;
 }
 
+static struct attribute *rmi_f54_attrs[] = {
+	&dev_attr_f54_report_type.attr,
+	&dev_attr_f54_control_addr.attr,
+	&dev_attr_f54_control_data.attr,
+	&dev_attr_f54_data_addr.attr,
+	&dev_attr_f54_data_data.attr,
+	&dev_attr_f54_command.attr,
+	NULL
+};
+
+static struct attribute_group rmi_f54_attr_group = {
+	.attrs          = rmi_f54_attrs,
+};
+
 static int rmi_f54_config(struct rmi_function *fn)
 {
 	struct rmi_driver *drv = fn->rmi_dev->driver;
@@ -679,6 +1118,22 @@ static int rmi_f54_probe(struct rmi_function *fn)
 	if (!f54->workqueue)
 		return -ENOMEM;
 
+	ret = sysfs_create_bin_file(&fn->dev.kobj, &f54_report_data);
+	if (ret < 0)
+		goto remove_wq;
+
+	ret = sysfs_create_bin_file(&fn->dev.kobj, &f54_query_data);
+	if (ret < 0)
+		goto remove_report;
+
+	ret = sysfs_create_bin_file(&fn->dev.kobj, &f54_control_data);
+	if (ret < 0)
+		goto remove_query;
+
+	ret = sysfs_create_group(&fn->dev.kobj, &rmi_f54_attr_group);
+	if (ret)
+		goto remove_control;
+
 	rmi_f54_create_input_map(f54);
 
 	/* register video device */
@@ -686,7 +1141,7 @@ static int rmi_f54_probe(struct rmi_function *fn)
 	ret = v4l2_device_register(&fn->dev, &f54->v4l2);
 	if (ret) {
 		dev_err(&fn->dev, "Unable to register video dev.\n");
-		goto remove_wq;
+		goto remove_group;
 	}
 
 	/* initialize the queue */
@@ -716,6 +1171,14 @@ static int rmi_f54_probe(struct rmi_function *fn)
 
 remove_v4l2:
 	v4l2_device_unregister(&f54->v4l2);
+remove_group:
+	sysfs_remove_group(&fn->dev.kobj, &rmi_f54_attr_group);
+remove_control:
+	sysfs_remove_bin_file(&fn->dev.kobj, &f54_control_data);
+remove_query:
+	sysfs_remove_bin_file(&fn->dev.kobj, &f54_query_data);
+remove_report:
+	sysfs_remove_bin_file(&fn->dev.kobj, &f54_report_data);
 remove_wq:
 	cancel_delayed_work_sync(&f54->work);
 	flush_workqueue(f54->workqueue);
@@ -729,6 +1192,10 @@ static void rmi_f54_remove(struct rmi_function *fn)
 
 	video_unregister_device(&f54->vdev);
 	v4l2_device_unregister(&f54->v4l2);
+	sysfs_remove_group(&fn->dev.kobj, &rmi_f54_attr_group);
+	sysfs_remove_bin_file(&fn->dev.kobj, &f54_control_data);
+	sysfs_remove_bin_file(&fn->dev.kobj, &f54_report_data);
+	sysfs_remove_bin_file(&fn->dev.kobj, &f54_query_data);
 }
 
 struct rmi_function_handler rmi_f54_handler = {
