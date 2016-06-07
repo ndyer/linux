@@ -69,23 +69,9 @@ struct f54_data {
 	u16 clock_rate;
 	u8 family;
 
-	enum f54_report_type report_type;
-	u8 *report_data;
-	int report_size;
-
 	bool is_busy;
 	struct mutex status_mutex;
 	struct mutex data_mutex;
-
-	struct workqueue_struct *workqueue;
-	struct delayed_work work;
-	unsigned long timeout;
-
-	struct completion cmd_done;
-
-	/* Data used for debugging */
-	u8 control_addr;
-	u8 data_addr;
 
 	/* V4L2 support */
 	struct v4l2_device v4l2;
@@ -95,6 +81,9 @@ struct f54_data {
 	struct mutex lock;
 	int input;
 	enum f54_report_type inputs[F54_MAX_REPORT_TYPE];
+	enum f54_report_type report_type;
+	struct vb2_buffer *vb;
+	u8 *report_data;
 };
 
 /*
@@ -168,25 +157,13 @@ static int rmi_f54_request_report(struct rmi_function *fn, u8 report_type)
 		f54->report_type = report_type;
 	}
 
-	/*
-	 * Small delay after disabling interrupts to avoid race condition
-	 * in firmare. This value is a bit higher than absolutely necessary.
-	 * Should be removed once issue is resolved in firmware.
-	 */
-	usleep_range(2000, 3000);
-
 	mutex_lock(&f54->data_mutex);
 
 	error = rmi_write(rmi_dev, fn->fd.command_base_addr, F54_GET_REPORT);
 	if (error < 0)
 		return error;
 
-	init_completion(&f54->cmd_done);
-
 	f54->is_busy = 1;
-	f54->timeout = jiffies + msecs_to_jiffies(100);
-
-	queue_delayed_work(f54->workqueue, &f54->work, 0);
 
 	mutex_unlock(&f54->data_mutex);
 
@@ -198,8 +175,11 @@ static int rmi_f54_get_report_size(struct f54_data *f54)
 	u8 rx = f54->num_rx_electrodes ? : f54->num_rx_electrodes;
 	u8 tx = f54->num_tx_electrodes ? : f54->num_tx_electrodes;
 	int size = 0;
+	enum f54_report_type reptype;
 
-	switch (f54->report_type) {
+	reptype = rmi_f54_get_reptype(f54, f54->input);
+
+	switch (reptype) {
 	case F54_8BIT_IMAGE:
 		size = rx * tx;
 		break;
@@ -252,11 +232,6 @@ static const struct v4l2_file_operations rmi_f54_video_fops = {
 	.poll = vb2_fop_poll,
 };
 
-struct rmi_f54_vb2_buffer {
-	struct vb2_buffer       vb;
-	struct list_head        list;
-};
-
 static int rmi_f54_queue_setup(struct vb2_queue *q,
 			       unsigned int *nbuffers, unsigned int *nplanes,
 			       unsigned int sizes[], void *alloc_ctxs[])
@@ -273,8 +248,6 @@ static int rmi_f54_queue_setup(struct vb2_queue *q,
 static void rmi_f54_buffer_queue(struct vb2_buffer *vb)
 {
 	struct f54_data *f54 = vb2_get_drv_priv(vb->vb2_queue);
-	u16 *ptr;
-	enum vb2_buffer_state state;
 	enum f54_report_type reptype;
 	int ret;
 
@@ -282,51 +255,28 @@ static void rmi_f54_buffer_queue(struct vb2_buffer *vb)
 
 	reptype = rmi_f54_get_reptype(f54, f54->input);
 	if (reptype == F54_REPORT_NONE) {
-		state = VB2_BUF_STATE_ERROR;
-		goto done;
+		ret = -EINVAL;
+		goto error;
 	}
 
 	if (f54->is_busy) {
-		state = VB2_BUF_STATE_ERROR;
-		goto done;
+		ret = -EBUSY;
+		goto error;
 	}
+
+	f54->vb = vb;
 
 	ret = rmi_f54_request_report(f54->fn, reptype);
-	if (ret) {
-		dev_err(&f54->fn->dev, "Error requesting F54 report\n");
-		state = VB2_BUF_STATE_ERROR;
-		goto done;
-	}
+	if (ret)
+		goto error;
 
-	/* get frame data */
-	mutex_lock(&f54->data_mutex);
+	mutex_unlock(&f54->status_mutex);
+	printk("%s: exit\n", __func__);
+	return;
 
-	while (f54->is_busy) {
-		mutex_unlock(&f54->data_mutex);
-		if (!wait_for_completion_timeout(&f54->cmd_done,
-						 msecs_to_jiffies(1000))) {
-			dev_err(&f54->fn->dev, "Timed out\n");
-			state = VB2_BUF_STATE_ERROR;
-			goto done;
-		}
-		mutex_lock(&f54->data_mutex);
-	}
-
-	ptr = vb2_plane_vaddr(vb, 0);
-	if (!ptr) {
-		dev_err(&f54->fn->dev, "Error acquiring frame ptr\n");
-		state = VB2_BUF_STATE_ERROR;
-		goto data_done;
-	}
-
-	memcpy(ptr, f54->report_data, f54->report_size);
-	vb2_set_plane_payload(vb, 0, rmi_f54_get_report_size(f54));
-	state = VB2_BUF_STATE_DONE;
-
-data_done:
-	mutex_unlock(&f54->data_mutex);
-done:
-	vb2_buffer_done(vb, state);
+error:
+	dev_err(&f54->fn->dev, "%s: error %d\n", __func__, ret);
+	vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
 	mutex_unlock(&f54->status_mutex);
 }
 
@@ -341,7 +291,7 @@ static const struct vb2_ops rmi_f54_queue_ops = {
 static const struct vb2_queue rmi_f54_queue = {
 	.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
 	.io_modes = VB2_MMAP,
-	.buf_struct_size = sizeof(struct rmi_f54_vb2_buffer),
+	.buf_struct_size = sizeof(struct vb2_buffer),
 	.ops = &rmi_f54_queue_ops,
 	.mem_ops = &vb2_vmalloc_memops,
 	.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC,
@@ -532,94 +482,77 @@ static struct rmi_f54_reports rmi_f54_standard_report[] = {
 	{ 0, 0 },
 };
 
-static void rmi_f54_work(struct work_struct *work)
+static int rmi_f54_attention(struct rmi_function *fn, unsigned long *irqbits)
 {
-	struct f54_data *f54 = container_of(work, struct f54_data, work.work);
-	struct rmi_function *fn = f54->fn;
+	struct f54_data *f54 = dev_get_drvdata(&fn->dev);
 	u8 fifo[2];
 	struct rmi_f54_reports *report;
 	int report_size;
-	u8 command;
 	u8 *data;
-	int error;
+	u16 *ptr;
+	enum vb2_buffer_state state = VB2_BUF_STATE_ERROR;
+	int ret;
 
-	data = f54->report_data;
+	printk(KERN_INFO "%s\n", __func__);
+
+	if (!f54->vb) {
+		dev_warn(&f54->fn->dev, "%s: no buffer\n", __func__);
+		return 0;
+	}
+
 	report_size = rmi_f54_get_report_size(f54);
 	if (report_size == 0) {
 		dev_err(&fn->dev, "Bad report size, report type=%d\n",
-				f54->report_type);
-		error = -EINVAL;
-		goto error;     /* retry won't help */
+			f54->report_type);
+		goto done;
 	}
 	rmi_f54_standard_report[0].size = report_size;
-	report = rmi_f54_standard_report;
 
 	mutex_lock(&f54->data_mutex);
 
-	/*
-	 * Need to check if command has completed.
-	 * If not try again later.
-	 */
-	error = rmi_read(fn->rmi_dev, f54->fn->fd.command_base_addr,
-	                 &command);
-	if (error) {
-		dev_err(&fn->dev, "Failed to read back command\n");
-		goto error;
-	}
-	if (command & F54_GET_REPORT) {
-		if (time_after(jiffies, f54->timeout)) {
-			dev_err(&fn->dev, "Get report command timed out\n");
-			error = -ETIMEDOUT;
-		}
-		report_size = 0;
-		goto error;
+	ptr = vb2_plane_vaddr(f54->vb, 0);
+	if (!ptr) {
+		dev_err(&f54->fn->dev, "Error acquiring frame ptr\n");
+		goto release;
 	}
 
-	rmi_dbg(RMI_DEBUG_FN, &fn->dev, "Get report command completed, reading data\n");
-
+	report = rmi_f54_standard_report;
 	report_size = 0;
 	for (; report->size; report++) {
 		fifo[0] = report->start & 0xff;
 		fifo[1] = (report->start >> 8) & 0xff;
-		error = rmi_write_block(fn->rmi_dev,
-		                        fn->fd.data_base_addr + F54_FIFO_OFFSET,
-		                        fifo, sizeof(fifo));
-		if (error) {
+
+		ret = rmi_write_block(fn->rmi_dev,
+				fn->fd.data_base_addr + F54_FIFO_OFFSET,
+				fifo, sizeof(fifo));
+		if (ret) {
 			dev_err(&fn->dev, "Failed to set fifo start offset\n");
-			goto abort;
+			goto release;
 		}
 
-		error = rmi_read_block(fn->rmi_dev,
-		                       fn->fd.data_base_addr + F54_REPORT_DATA_OFFSET,
-		                       data, report->size);
-		if (error) {
-			dev_err(&fn->dev, "Report data read [%d bytes] returned %d\n",
-			        report->size, error);
-			goto abort;
+		ret = rmi_read_block(fn->rmi_dev,
+				fn->fd.data_base_addr + F54_REPORT_DATA_OFFSET,
+				data, report->size);
+		if (ret) {
+			dev_err(&fn->dev, "%s: read [%d bytes] ret=%d\n",
+			        __func__, report->size, ret);
+			goto release;
 		}
+
 		data += report->size;
 		report_size += report->size;
 	}
 
-abort:
-	f54->report_size = error ? 0 : report_size;
-error:
-	if (error)
-		report_size = 0;
+	memcpy(ptr, data, report_size);
+	vb2_set_plane_payload(f54->vb, 0, report_size);
+	state = VB2_BUF_STATE_DONE;
 
-	if (report_size == 0 && !error) {
-		queue_delayed_work(f54->workqueue, &f54->work,
-		                   msecs_to_jiffies(1));
-	} else {
-		f54->is_busy = false;
-		complete(&f54->cmd_done);
-	}
-
+release:
+	f54->is_busy = 0;
 	mutex_unlock(&f54->data_mutex);
-}
-
-static int rmi_f54_attention(struct rmi_function *fn, unsigned long *irqbits)
-{
+done:
+	vb2_buffer_done(f54->vb, state);
+	f54->vb = 0;
 	return 0;
 }
 
@@ -635,9 +568,7 @@ static int rmi_f54_config(struct rmi_function *fn)
 static int rmi_f54_detect(struct rmi_function *fn)
 {
 	int error;
-	struct f54_data *f54;
-
-	f54 = dev_get_drvdata(&fn->dev);
+	struct f54_data *f54 = dev_get_drvdata(&fn->dev);
 
 	error = rmi_read_block(fn->rmi_dev, fn->fd.query_base_addr,
 	                       &f54->qry, sizeof(f54->qry));
@@ -673,7 +604,7 @@ static int rmi_f54_probe(struct rmi_function *fn)
 {
 	struct f54_data *f54;
 	int ret;
-	u8 rx, tx;
+	u8 tx, rx;
 
 	f54 = devm_kzalloc(&fn->dev, sizeof(struct f54_data), GFP_KERNEL);
 	if (!f54)
@@ -691,16 +622,9 @@ static int rmi_f54_probe(struct rmi_function *fn)
 
 	rx = f54->num_rx_electrodes;
 	tx = f54->num_tx_electrodes;
-	f54->report_data = devm_kzalloc(&fn->dev,
-	                                F54_MAX_REPORT_SIZE(rx, tx),
-	                                GFP_KERNEL);
+	f54->report_data = devm_kzalloc(&fn->dev, F54_MAX_REPORT_SIZE(rx, tx),
+					GFP_KERNEL);
 	if (f54->report_data == NULL)
-		return -ENOMEM;
-
-	INIT_DELAYED_WORK(&f54->work, rmi_f54_work);
-
-	f54->workqueue = create_singlethread_workqueue("rmi4-poller");
-	if (!f54->workqueue)
 		return -ENOMEM;
 
 	rmi_f54_create_input_map(f54);
@@ -710,7 +634,7 @@ static int rmi_f54_probe(struct rmi_function *fn)
 	ret = v4l2_device_register(&fn->dev, &f54->v4l2);
 	if (ret) {
 		dev_err(&fn->dev, "Unable to register video dev.\n");
-		goto remove_wq;
+		return ret;
 	}
 
 	/* initialize the queue */
@@ -740,10 +664,6 @@ static int rmi_f54_probe(struct rmi_function *fn)
 
 remove_v4l2:
 	v4l2_device_unregister(&f54->v4l2);
-remove_wq:
-	cancel_delayed_work_sync(&f54->work);
-	flush_workqueue(f54->workqueue);
-	destroy_workqueue(f54->workqueue);
 	return ret;
 }
 
