@@ -10,6 +10,7 @@
 #include <linux/rmi.h>
 #include <linux/input.h>
 #include <linux/slab.h>
+#include <linux/gpio.h>
 #include "rmi_driver.h"
 
 #define RMI_F30_QUERY_SIZE			2
@@ -55,6 +56,8 @@ struct rmi_f30_ctrl_data {
 					+ 1)
 
 struct f30_data {
+	struct rmi_function *fn;
+
 	/* Query Data */
 	bool has_extended_pattern;
 	bool has_mappable_buttons;
@@ -75,7 +78,13 @@ struct f30_data {
 	u8 data_regs[RMI_F30_CTRL_MAX_BYTES];
 	u16 *gpioled_key_map;
 
+	struct mutex ctrl_mutex;
+
 	struct input_dev *input;
+
+#ifdef CONFIG_GPIOLIB
+	struct gpio_chip gc;
+#endif
 };
 
 static int rmi_f30_read_control_parameters(struct rmi_function *fn,
@@ -84,15 +93,17 @@ static int rmi_f30_read_control_parameters(struct rmi_function *fn,
 	struct rmi_device *rmi_dev = fn->rmi_dev;
 	int error = 0;
 
+	mutex_lock(&f30->ctrl_mutex);
+
 	error = rmi_read_block(rmi_dev, fn->fd.control_base_addr,
 				f30->ctrl_regs, f30->ctrl_regs_size);
-	if (error) {
+	if (error)
 		dev_err(&rmi_dev->dev, "%s : Could not read control registers at 0x%x error (%d)\n",
 			__func__, fn->fd.control_base_addr, error);
-		return error;
-	}
 
-	return 0;
+	mutex_unlock(&f30->ctrl_mutex);
+
+	return error;
 }
 
 static int rmi_f30_attention(struct rmi_function *fn, unsigned long *irq_bits)
@@ -148,7 +159,195 @@ static int rmi_f30_attention(struct rmi_function *fn, unsigned long *irq_bits)
 	return 0;
 }
 
-static int rmi_f30_register_device(struct rmi_function *fn)
+#ifdef CONFIG_GPIOLIB
+static int rmi_f30_gpio_request(struct gpio_chip *gc, unsigned int gpio)
+{
+	struct f30_data *f30 = gpiochip_get_data(gc);
+
+	if (f30->gpioled_key_map[gpio] != 0) {
+		dev_err(gc->parent, "GPIO %d used as key\n", gc->base + gpio);
+		return -EBUSY;
+	}
+
+	return 0;
+}
+
+static int rmi_f30_gpio_direction_input(struct gpio_chip *gc, unsigned int gpio)
+{
+	struct f30_data *f30 = gpiochip_get_data(gc);
+	struct rmi_device *rmi_dev = f30->fn->rmi_dev;
+	int ret;
+	int byte_pos = gpio >> 3;
+	int bit_pos = gpio & 0x07;
+
+	mutex_lock(&f30->ctrl_mutex);
+
+	/* DirN = 0 */
+	f30->ctrl[2].regs[byte_pos] &= ~BIT(bit_pos);
+
+	/* DataN = 1 - enable pull-up */
+	f30->ctrl[3].regs[byte_pos] |= BIT(bit_pos);
+
+	/* Write DirN followed by DataN to prevent glitch */
+	ret = rmi_write_block(rmi_dev, f30->ctrl[2].address,
+			      f30->ctrl[2].regs, f30->ctrl[2].length);
+	if (ret)
+		goto release;
+
+	ret = rmi_write_block(rmi_dev, f30->ctrl[3].address,
+			      f30->ctrl[3].regs, f30->ctrl[3].length);
+
+release:
+	mutex_unlock(&f30->ctrl_mutex);
+	return ret;
+}
+
+static int rmi_f30_gpio_direction_output(struct gpio_chip *gc,
+					 unsigned int gpio, int value)
+{
+	struct f30_data *f30 = gpiochip_get_data(gc);
+	struct rmi_device *rmi_dev = f30->fn->rmi_dev;
+	int ret;
+	int byte_pos = gpio >> 3;
+	int bit_pos = gpio & 0x07;
+
+	mutex_lock(&f30->ctrl_mutex);
+
+	/* DirN = 1 */
+	f30->ctrl[2].regs[byte_pos] |= BIT(bit_pos);
+
+	/* DataN = 0/1 */
+	if (value)
+		f30->ctrl[3].regs[byte_pos] |= BIT(bit_pos);
+	else
+		f30->ctrl[3].regs[byte_pos] &= ~BIT(bit_pos);
+
+	/* Write DataN followed by DirN to prevent glitch */
+	ret = rmi_write_block(rmi_dev, f30->ctrl[3].address,
+			      f30->ctrl[3].regs, f30->ctrl[3].length);
+	if (ret)
+		goto release;
+
+	ret = rmi_write_block(rmi_dev, f30->ctrl[2].address,
+			      f30->ctrl[2].regs, f30->ctrl[2].length);
+
+release:
+	mutex_unlock(&f30->ctrl_mutex);
+	return ret;
+}
+
+static int rmi_f30_gpio_get_value(struct gpio_chip *gc, unsigned int gpio)
+{
+	struct f30_data *f30 = gpiochip_get_data(gc);
+	struct rmi_device *rmi_dev = f30->fn->rmi_dev;
+	int ret;
+	int byte_pos = gpio >> 3;
+	int bit_pos = gpio & 0x07;
+
+	/* Read data registers */
+	ret = rmi_read_block(rmi_dev, f30->fn->fd.data_base_addr,
+			     f30->data_regs, f30->register_count);
+	if (ret)
+		return ret;
+
+	return f30->data_regs[byte_pos] & BIT(bit_pos);
+}
+
+static void rmi_f30_gpio_set_value(struct gpio_chip *gc, unsigned int gpio,
+				   int value)
+{
+	struct f30_data *f30 = gpiochip_get_data(gc);
+	struct rmi_device *rmi_dev = f30->fn->rmi_dev;
+	int byte_pos = gpio >> 3;
+	int bit_pos = gpio & 0x07;
+
+	mutex_lock(&f30->ctrl_mutex);
+
+	/* DataN = 0/1 */
+	if (value)
+		f30->ctrl[3].regs[byte_pos] |= BIT(bit_pos);
+	else
+		f30->ctrl[3].regs[byte_pos] &= ~BIT(bit_pos);
+
+	rmi_write_block(rmi_dev, f30->ctrl[3].address,
+			f30->ctrl[3].regs, f30->ctrl[3].length);
+
+	mutex_unlock(&f30->ctrl_mutex);
+}
+
+#ifdef CONFIG_DEBUG_FS
+static void rmi_f30_gpio_dbg_show(struct seq_file *s, struct gpio_chip *gc)
+{
+	struct f30_data *f30 = gpiochip_get_data(gc);
+	int i;
+
+	for (i = 0; i < f30->gpioled_count; i++) {
+		int gpio = i + gc->base;
+		const char *label;
+		int byte_pos = i >> 3;
+		int bit_pos = i & 0x07;
+		bool dir = f30->ctrl[2].regs[byte_pos] & BIT(bit_pos);
+		bool data = f30->ctrl[3].regs[byte_pos] & BIT(bit_pos);
+
+		label = gpiochip_is_requested(gc, i);
+		if (!label)
+			label = "Unrequested";
+
+		seq_printf(s, " gpio-%-3d (%-20.20s) ", gpio, label);
+
+		if (f30->gpioled_key_map[i] != 0) {
+			seq_printf(s, " key %d\n", f30->gpioled_key_map[i]);
+			continue;
+		}
+
+		if (dir)
+			seq_printf(s, "driving digital %d\n", data);
+		else
+			if (data)
+				seq_puts(s, " high-impedance state\n");
+			else
+				seq_puts(s, " pull-up\n");
+	}
+}
+#else
+#define rmi_f30_gpio_dbg_show NULL
+#endif
+
+static int rmi_f30_register_gpio(struct rmi_function *fn)
+{
+	struct f30_data *f30 = dev_get_drvdata(&fn->dev);
+	int ret;
+
+	mutex_init(&f30->ctrl_mutex);
+
+	f30->gc.request = rmi_f30_gpio_request;
+	f30->gc.direction_input = rmi_f30_gpio_direction_input;
+	f30->gc.direction_output = rmi_f30_gpio_direction_output;
+	f30->gc.get = rmi_f30_gpio_get_value;
+	f30->gc.set = rmi_f30_gpio_set_value;
+	f30->gc.dbg_show = rmi_f30_gpio_dbg_show;
+	f30->gc.can_sleep = 1;
+	f30->gc.base = -1;
+	f30->gc.ngpio = f30->gpioled_count;
+	f30->gc.label = "rmi4_f30";
+	f30->gc.owner = THIS_MODULE;
+	f30->gc.parent = &fn->dev;
+
+	ret = devm_gpiochip_add_data(&fn->dev, &f30->gc, f30);
+	if (ret)
+		dev_err(&fn->dev, "%s: Failed to add gpiochip ret=%d\n",
+			__func__, ret);
+
+	return 0;
+}
+#else
+static int rmi_f30_gpio_add(struct rmi_function *fn)
+{
+	return 0;
+}
+#endif /* CONFIG_GPIOLIB */
+
+static int rmi_f30_register_input(struct rmi_function *fn)
 {
 	int i;
 	struct rmi_device *rmi_dev = fn->rmi_dev;
@@ -196,8 +395,10 @@ static int rmi_f30_config(struct rmi_function *fn)
 		drv->clear_irq_bits(fn->rmi_dev, fn->irq_mask);
 	} else {
 		/* Write Control Register values back to device */
+		mutex_lock(&f30->ctrl_mutex);
 		error = rmi_write_block(fn->rmi_dev, fn->fd.control_base_addr,
 					f30->ctrl_regs, f30->ctrl_regs_size);
+		mutex_unlock(&f30->ctrl_mutex);
 		if (error) {
 			dev_err(&fn->rmi_dev->dev,
 				"%s : Could not write control registers at 0x%x error (%d)\n",
@@ -253,6 +454,7 @@ static inline int rmi_f30_initialize(struct rmi_function *fn)
 		return -ENOMEM;
 
 	dev_set_drvdata(&fn->dev, f30);
+	f30->fn = fn;
 
 	retval = rmi_read_block(fn->rmi_dev, fn->fd.query_base_addr, buf,
 				RMI_F30_QUERY_SIZE);
@@ -336,7 +538,7 @@ static inline int rmi_f30_initialize(struct rmi_function *fn)
 	retval = rmi_f30_read_control_parameters(fn, f30);
 	if (retval < 0) {
 		dev_err(&fn->dev,
-			"Failed to initialize F19 control params.\n");
+			"Failed to initialize F30 control params.\n");
 		return retval;
 	}
 
@@ -385,9 +587,15 @@ static int rmi_f30_probe(struct rmi_function *fn)
 	if (rc < 0)
 		goto error_exit;
 
-	rc = rmi_f30_register_device(fn);
+	rc = rmi_f30_register_input(fn);
 	if (rc < 0)
 		goto error_exit;
+
+	rc = rmi_f30_register_gpio(fn);
+	if (rc < 0)
+		goto error_exit;
+
+	rmi_dbg(RMI_DEBUG_FN, &fn->dev, "Initialized F30\n");
 
 	return 0;
 
