@@ -14,7 +14,6 @@
 #include <linux/i2c.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
-#include <media/videobuf2-v4l2.h>
 #include <media/videobuf2-vmalloc.h>
 #include "rmi_driver.h"
 
@@ -769,18 +768,17 @@ static const struct v4l2_file_operations rmi_f54_video_fops = {
 	.poll = vb2_fop_poll,
 };
 
-static int rmi_f54_queue_setup(struct vb2_queue *q,
+static int rmi_f54_queue_setup(struct vb2_queue *q, const struct v4l2_format *fmt,
 			       unsigned int *nbuffers, unsigned int *nplanes,
 			       unsigned int sizes[], void *alloc_ctxs[])
 {
 	struct f54_data *f54 = q->drv_priv;
 
-	if (*nplanes)
-		return sizes[0] < rmi_f54_get_report_size(f54) ? -EINVAL : 0;
+	if (fmt && fmt->fmt.pix.sizeimage < rmi_f54_get_report_size(f54))
+		return -EINVAL;
 
 	*nplanes = 1;
-	sizes[0] = rmi_f54_get_report_size(f54);
-
+	sizes[0] = fmt ? fmt->fmt.pix.sizeimage : rmi_f54_get_report_size(f54);
 	return 0;
 }
 
@@ -861,8 +859,7 @@ static const struct vb2_queue rmi_f54_queue = {
 	.buf_struct_size = sizeof(struct vb2_buffer),
 	.ops = &rmi_f54_queue_ops,
 	.mem_ops = &vb2_vmalloc_memops,
-	.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC,
-	.min_buffers_needed = 1,
+	.timestamp_type = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC,
 };
 
 static int rmi_f54_vidioc_querycap(struct file *file, void *priv,
@@ -873,6 +870,10 @@ static int rmi_f54_vidioc_querycap(struct file *file, void *priv,
 	strlcpy(cap->driver, F54_NAME, sizeof(cap->driver));
 	strlcpy(cap->card, SYNAPTICS_INPUT_DEVICE_NAME, sizeof(cap->card));
 	strlcpy(cap->bus_info, dev_name(&f54->fn->dev), sizeof(cap->bus_info));
+
+	cap->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_READWRITE |
+			   V4L2_CAP_STREAMING;
+	cap->capabilities = cap->device_caps | V4L2_CAP_DEVICE_CAPS;
 
 	return 0;
 }
@@ -932,7 +933,7 @@ static int rmi_f54_set_input(struct f54_data *f54, unsigned int i)
 	f->height = f54->num_tx_electrodes;
 	f->pixelformat = V4L2_PIX_FMT_YS16;
 	f->field = V4L2_FIELD_NONE;
-	f->colorspace = V4L2_COLORSPACE_RAW;
+	f->colorspace = V4L2_COLORSPACE_SRGB;
 	f->bytesperline = f->width * sizeof(u16);
 	f->sizeimage = f->width * f->height * sizeof(u16);
 
@@ -1015,8 +1016,6 @@ static const struct video_device rmi_f54_video_device = {
 	.fops = &rmi_f54_video_fops,
 	.ioctl_ops = &rmi_f54_video_ioctl_ops,
 	.release = video_device_release_empty,
-	.device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_READWRITE |
-		       V4L2_CAP_STREAMING,
 };
 
 /*
