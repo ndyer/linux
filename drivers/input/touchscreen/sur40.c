@@ -599,7 +599,7 @@ static int sur40_probe(struct usb_interface *interface,
 	sur40->vdev.queue = &sur40->queue;
 	video_set_drvdata(&sur40->vdev, sur40);
 
-	error = video_register_device(&sur40->vdev, VFL_TYPE_GRABBER, -1);
+	error = video_register_device(&sur40->vdev, VFL_TYPE_TOUCH, -1);
 	if (error) {
 		dev_err(&interface->dev,
 			"Unable to register video subdevice.");
@@ -763,7 +763,7 @@ static int sur40_vidioc_enum_input(struct file *file, void *priv,
 {
 	if (i->index != 0)
 		return -EINVAL;
-	i->type = V4L2_INPUT_TYPE_CAMERA;
+	i->type = V4L2_INPUT_TYPE_TOUCH;
 	i->std = V4L2_STD_UNKNOWN;
 	strlcpy(i->name, "In-Cell Sensor", sizeof(i->name));
 	i->capabilities = 0;
@@ -794,7 +794,7 @@ static int sur40_vidioc_enum_fmt(struct file *file, void *priv,
 	if (f->index != 0)
 		return -EINVAL;
 	strlcpy(f->description, "8-bit greyscale", sizeof(f->description));
-	f->pixelformat = V4L2_PIX_FMT_GREY;
+	f->pixelformat = V4L2_TCH_FMT_TU08;
 	f->flags = 0;
 	return 0;
 }
@@ -802,7 +802,7 @@ static int sur40_vidioc_enum_fmt(struct file *file, void *priv,
 static int sur40_vidioc_enum_framesizes(struct file *file, void *priv,
 					struct v4l2_frmsizeenum *f)
 {
-	if ((f->index != 0) || (f->pixel_format != V4L2_PIX_FMT_GREY))
+	if ((f->index != 0) || (f->pixel_format != V4L2_TCH_FMT_TU08))
 		return -EINVAL;
 
 	f->type = V4L2_FRMSIZE_TYPE_DISCRETE;
@@ -814,7 +814,7 @@ static int sur40_vidioc_enum_framesizes(struct file *file, void *priv,
 static int sur40_vidioc_enum_frameintervals(struct file *file, void *priv,
 					    struct v4l2_frmivalenum *f)
 {
-	if ((f->index > 1) || (f->pixel_format != V4L2_PIX_FMT_GREY)
+	if ((f->index > 1) || (f->pixel_format != V4L2_TCH_FMT_TU08)
 		|| (f->width  != sur40_video_format.width)
 		|| (f->height != sur40_video_format.height))
 			return -EINVAL;
@@ -903,7 +903,7 @@ static const struct video_device sur40_video_device = {
 };
 
 static const struct v4l2_pix_format sur40_video_format = {
-	.pixelformat = V4L2_PIX_FMT_GREY,
+	.pixelformat = V4L2_TCH_FMT_TU08,
 	.width  = SENSOR_RES_X / 2,
 	.height = SENSOR_RES_Y / 2,
 	.field = V4L2_FIELD_NONE,
