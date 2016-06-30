@@ -1754,6 +1754,19 @@ interface only.</para>
 
   </section>
 
+  <section id="tch-formats">
+    <title>Touch Formats</title>
+
+    <para>These formats are used for <link linkend="touch">Touch Sensor</link>
+interface only.</para>
+
+    &sub-tch-td16;
+    &sub-tch-td08;
+    &sub-tch-tu16;
+    &sub-tch-tu08;
+
+  </section>
+
   <section id="pixfmt-reserved">
     <title>Reserved Format Identifiers</title>
 
