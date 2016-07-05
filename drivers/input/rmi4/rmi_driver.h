@@ -96,10 +96,17 @@ bool rmi_is_physical_driver(struct device_driver *);
 int rmi_register_physical_driver(void);
 void rmi_unregister_physical_driver(void);
 
+struct firmware;
+
 char *rmi_f01_get_product_ID(struct rmi_function *fn);
+int rmi_f34_update_firmware(struct rmi_function *fn, const struct firmware *fw);
+int rmi_f34_enable_flash(struct rmi_function *fn);
+int rmi_f34_status(struct rmi_function *fn);
+int rmi_f34_check_supported(struct rmi_function *fn);
 
 extern struct rmi_function_handler rmi_f01_handler;
 extern struct rmi_function_handler rmi_f11_handler;
 extern struct rmi_function_handler rmi_f12_handler;
 extern struct rmi_function_handler rmi_f30_handler;
+extern struct rmi_function_handler rmi_f34_handler;
 #endif
