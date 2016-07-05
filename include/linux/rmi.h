@@ -330,7 +330,8 @@ struct rmi_driver_data {
 	struct rmi_device *rmi_dev;
 
 	struct rmi_function *f01_container;
-	bool f01_bootloader_mode;
+	struct rmi_function *f34_container;
+	bool bootloader_mode;
 
 	u32 attn_count;
 	int num_of_irq_regs;

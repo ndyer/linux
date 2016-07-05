@@ -231,6 +231,9 @@ err_put_device:
 
 void rmi_unregister_function(struct rmi_function *fn)
 {
+	rmi_dbg(RMI_DEBUG_CORE, &fn->dev, "Unregistering F%02X.\n",
+			fn->fd.function_number);
+
 	device_del(&fn->dev);
 
 	if (fn->dev.of_node)
@@ -314,6 +317,9 @@ static struct rmi_function_handler *fn_handlers[] = {
 #endif
 #ifdef CONFIG_RMI4_F30
 	&rmi_f30_handler,
+#endif
+#ifdef CONFIG_RMI4_F34
+	&rmi_f34_handler,
 #endif
 };
 

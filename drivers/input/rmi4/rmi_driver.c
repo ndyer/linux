@@ -21,6 +21,7 @@
 #include <linux/pm.h>
 #include <linux/slab.h>
 #include <linux/of.h>
+#include <linux/firmware.h>
 #include <uapi/linux/input.h>
 #include <linux/rmi.h>
 #include "rmi_bus.h"
@@ -34,6 +35,8 @@
 #define RMI_DEVICE_RESET_CMD	0x01
 #define DEFAULT_RESET_DELAY_MS	100
 
+#define V7_FLASH_STATUS_OFFSET 0
+
 static void rmi_free_function_list(struct rmi_device *rmi_dev)
 {
 	struct rmi_function *fn, *tmp;
@@ -41,7 +44,16 @@ static void rmi_free_function_list(struct rmi_device *rmi_dev)
 
 	rmi_dbg(RMI_DEBUG_CORE, &rmi_dev->dev, "Freeing function list\n");
 
+	mutex_lock(&data->irq_mutex);
+
 	data->f01_container = NULL;
+	data->f34_container = NULL;
+	data->irq_status = NULL;
+	data->fn_irq_bits = NULL;
+	data->current_irq_mask = NULL;
+	data->new_irq_mask = NULL;
+
+	mutex_unlock(&data->irq_mutex);
 
 	/* Doing it in the reverse order so F01 will be removed last */
 	list_for_each_entry_safe_reverse(fn, tmp,
@@ -49,6 +61,7 @@ static void rmi_free_function_list(struct rmi_device *rmi_dev)
 		list_del(&fn->node);
 		rmi_unregister_function(fn);
 	}
+
 }
 
 static int reset_one_function(struct rmi_function *fn)
@@ -143,8 +156,11 @@ int rmi_process_interrupt_requests(struct rmi_device *rmi_dev)
 	struct rmi_function *entry;
 	int error;
 
-	if (!data)
+	mutex_lock(&data->irq_mutex);
+	if (!data || !data->irq_status || !data->f01_container) {
+		mutex_unlock(&data->irq_mutex);
 		return 0;
+	}
 
 	if (!rmi_dev->xport->attn_data) {
 		error = rmi_read_block(rmi_dev,
@@ -156,7 +172,6 @@ int rmi_process_interrupt_requests(struct rmi_device *rmi_dev)
 		}
 	}
 
-	mutex_lock(&data->irq_mutex);
 	bitmap_and(data->irq_status, data->irq_status, data->current_irq_mask,
 	       data->irq_count);
 	/*
@@ -452,7 +467,7 @@ static int rmi_scan_pdt_page(struct rmi_device *rmi_dev,
 			return retval;
 	}
 
-	return (data->f01_bootloader_mode || addr == pdt_start) ?
+	return (data->bootloader_mode || addr == pdt_start) ?
 					RMI_SCAN_DONE : RMI_SCAN_CONTINUE;
 }
 
@@ -659,9 +674,6 @@ bool rmi_register_desc_has_subpacket(const struct rmi_register_desc_item *item,
 				subpacket) == subpacket;
 }
 
-/* Indicates that flash programming is enabled (bootloader mode). */
-#define RMI_F01_STATUS_BOOTLOADER(status)	(!!((status) & 0x40))
-
 /*
  * Given the PDT entry for F01, read the device status register to determine
  * if we're stuck in bootloader mode or not.
@@ -673,7 +685,7 @@ static int rmi_check_bootloader_mode(struct rmi_device *rmi_dev,
 	int error;
 	u8 device_status;
 
-	error = rmi_read(rmi_dev, pdt->data_base_addr + pdt->page_start,
+	error = rmi_read(rmi_dev, pdt->data_base_addr + V7_FLASH_STATUS_OFFSET,
 			 &device_status);
 	if (error) {
 		dev_err(&rmi_dev->dev,
@@ -681,7 +693,7 @@ static int rmi_check_bootloader_mode(struct rmi_device *rmi_dev,
 		return error;
 	}
 
-	return RMI_F01_STATUS_BOOTLOADER(device_status);
+	return !!(device_status >> 7);
 }
 
 static int rmi_count_irqs(struct rmi_device *rmi_dev,
@@ -691,10 +703,10 @@ static int rmi_count_irqs(struct rmi_device *rmi_dev,
 	int *irq_count = ctx;
 
 	*irq_count += pdt->interrupt_source_count;
-	if (pdt->function_number == 0x01) {
-		data->f01_bootloader_mode =
+	if (pdt->function_number == 0x34) {
+		data->bootloader_mode =
 			rmi_check_bootloader_mode(rmi_dev, pdt);
-		if (data->f01_bootloader_mode)
+		if (data->bootloader_mode)
 			dev_warn(&rmi_dev->dev,
 				"WARNING: RMI4 device is in bootloader mode!\n");
 	}
@@ -722,6 +734,7 @@ static int rmi_initial_reset(struct rmi_device *rmi_dev,
 			return RMI_SCAN_DONE;
 		}
 
+		rmi_dbg(RMI_DEBUG_CORE, &rmi_dev->dev, "Sending reset\n");
 		error = rmi_write_block(rmi_dev, cmd_addr, &cmd_buf, 1);
 		if (error) {
 			dev_err(&rmi_dev->dev,
@@ -778,6 +791,8 @@ static int rmi_create_function(struct rmi_device *rmi_dev,
 
 	if (pdt->function_number == 0x01)
 		data->f01_container = fn;
+	else if (pdt->function_number == 0x34)
+		data->f34_container = fn;
 
 	list_add_tail(&fn->node, &data->function_list);
 
@@ -814,10 +829,59 @@ int rmi_driver_resume(struct rmi_device *rmi_dev)
 }
 EXPORT_SYMBOL_GPL(rmi_driver_resume);
 
+#ifdef CONFIG_RMI4_F34
+static int rmi_firmware_update(struct rmi_driver_data *data,
+			       const struct firmware *fw);
+
+static ssize_t rmi_driver_update_fw_store(struct device *dev,
+					  struct device_attribute *dattr,
+					  const char *buf, size_t count)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	char fw_name[NAME_MAX];
+	const struct firmware *fw;
+	size_t copy_count = count;
+	int ret;
+
+	if (count == 0 || count >= NAME_MAX)
+		return -EINVAL;
+
+	if (buf[count - 1] == '\0' || buf[count - 1] == '\n')
+		copy_count -= 1;
+
+	strncpy(fw_name, buf, copy_count);
+	fw_name[copy_count] = '\0';
+
+	ret = request_firmware(&fw, fw_name, dev);
+	if (ret)
+		return ret;
+
+	ret = rmi_firmware_update(data, fw);
+
+	release_firmware(fw);
+
+	return ret ?: count;
+}
+
+static DEVICE_ATTR(update_fw, S_IWUSR, NULL, rmi_driver_update_fw_store);
+
+static struct attribute *rmi_firmware_attrs[] = {
+	&dev_attr_update_fw.attr,
+	NULL
+};
+
+static struct attribute_group rmi_firmware_attr_group = {
+	.attrs = rmi_firmware_attrs,
+};
+#endif /* CONFIG_RMI4_F34 */
+
 static int rmi_driver_remove(struct device *dev)
 {
 	struct rmi_device *rmi_dev = to_rmi_device(dev);
 
+#ifdef CONFIG_RMI4_F34
+	sysfs_remove_group(&rmi_dev->dev.kobj, &rmi_firmware_attr_group);
+#endif
 	rmi_free_function_list(rmi_dev);
 
 	return 0;
@@ -922,6 +986,71 @@ err_destroy_functions:
 	return retval;
 }
 
+#ifdef CONFIG_RMI4_F34
+static int rmi_firmware_update(struct rmi_driver_data *data,
+			       const struct firmware *fw)
+{
+	struct device *dev = &data->rmi_dev->dev;
+	int ret;
+
+	if (!data->f34_container) {
+		dev_warn(dev, "%s: No F34 present!\n",
+			 __func__);
+		return -EINVAL;
+	}
+
+	/* Enter flash mode */
+	rmi_dbg(RMI_DEBUG_FLASH, dev, "Enabling flash\n");
+	ret = fwu_start_reflash_v7(data->f34_container, fw);
+	if (ret)
+		return ret;
+
+	/* Tear down functions and re-probe */
+	rmi_free_function_list(data->rmi_dev);
+
+	ret = rmi_probe_interrupts(data);
+	if (ret)
+		return ret;
+
+	ret = rmi_init_functions(data);
+	if (ret)
+		return ret;
+
+	if (!data->bootloader_mode || !data->f34_container) {
+		dev_warn(dev, "%s: No F34 present or not in bootloader!\n",
+			 __func__);
+		return -EINVAL;
+	}
+
+	/* Perform firmware update */
+	ret = fwu_do_reflash_v7(data->f34_container, fw);
+
+	/* Re-probe */
+	rmi_dbg(RMI_DEBUG_FLASH, dev, "Re-probing device\n");
+	rmi_free_function_list(data->rmi_dev);
+
+	ret = rmi_scan_pdt(data->rmi_dev, NULL, rmi_initial_reset);
+	if (ret < 0)
+		dev_warn(dev, "RMI reset failed!\n");
+
+	ret = rmi_probe_interrupts(data);
+	if (ret)
+		return ret;
+
+	ret = rmi_init_functions(data);
+	if (ret)
+		return ret;
+
+	if (data->f01_container->dev.driver)
+		/* Driver already bound, so enable ATTN now. */
+		return enable_sensor(data->rmi_dev);
+
+	rmi_dbg(RMI_DEBUG_FLASH, dev, "%s complete\n", __func__);
+
+	return ret;
+}
+#endif
+
 static int rmi_driver_probe(struct device *dev)
 {
 	struct rmi_driver *rmi_driver;
@@ -1020,6 +1149,12 @@ static int rmi_driver_probe(struct device *dev)
 		data->input->phys = devm_kasprintf(dev, GFP_KERNEL,
 						"%s/input0", dev_name(dev));
 	}
+
+#ifdef CONFIG_RMI4_F34
+	retval = sysfs_create_group(&dev->kobj, &rmi_firmware_attr_group);
+	if (retval)
+		goto err_destroy_functions;
+#endif
 
 	retval = rmi_init_functions(data);
 	if (retval)
