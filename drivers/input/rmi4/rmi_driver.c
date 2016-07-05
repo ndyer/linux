@@ -33,14 +33,23 @@
 #define RMI_DEVICE_RESET_CMD	0x01
 #define DEFAULT_RESET_DELAY_MS	100
 
-static void rmi_free_function_list(struct rmi_device *rmi_dev)
+void rmi_free_function_list(struct rmi_device *rmi_dev)
 {
 	struct rmi_function *fn, *tmp;
 	struct rmi_driver_data *data = dev_get_drvdata(&rmi_dev->dev);
 
 	rmi_dbg(RMI_DEBUG_CORE, &rmi_dev->dev, "Freeing function list\n");
 
+	mutex_lock(&data->irq_mutex);
+
 	data->f01_container = NULL;
+	data->f34_container = NULL;
+	data->irq_status = NULL;
+	data->fn_irq_bits = NULL;
+	data->current_irq_mask = NULL;
+	data->new_irq_mask = NULL;
+
+	mutex_unlock(&data->irq_mutex);
 
 	/* Doing it in the reverse order so F01 will be removed last */
 	list_for_each_entry_safe_reverse(fn, tmp,
@@ -48,7 +57,9 @@ static void rmi_free_function_list(struct rmi_device *rmi_dev)
 		list_del(&fn->node);
 		rmi_unregister_function(fn);
 	}
+
 }
+EXPORT_SYMBOL_GPL(rmi_free_function_list);
 
 static int reset_one_function(struct rmi_function *fn)
 {
@@ -142,8 +153,11 @@ int rmi_process_interrupt_requests(struct rmi_device *rmi_dev)
 	struct rmi_function *entry;
 	int error;
 
-	if (!data)
+	mutex_lock(&data->irq_mutex);
+	if (!data || !data->irq_status || !data->f01_container) {
+		mutex_unlock(&data->irq_mutex);
 		return 0;
+	}
 
 	if (!rmi_dev->xport->attn_data) {
 		error = rmi_read_block(rmi_dev,
@@ -155,7 +169,6 @@ int rmi_process_interrupt_requests(struct rmi_device *rmi_dev)
 		}
 	}
 
-	mutex_lock(&data->irq_mutex);
 	bitmap_and(data->irq_status, data->irq_status, data->current_irq_mask,
 	       data->irq_count);
 	/*
@@ -250,7 +263,7 @@ static int rmi_resume_functions(struct rmi_device *rmi_dev)
 	return 0;
 }
 
-static int enable_sensor(struct rmi_device *rmi_dev)
+int rmi_enable_sensor(struct rmi_device *rmi_dev)
 {
 	int retval = 0;
 
@@ -260,6 +273,7 @@ static int enable_sensor(struct rmi_device *rmi_dev)
 
 	return rmi_process_interrupt_requests(rmi_dev);
 }
+EXPORT_SYMBOL_GPL(rmi_enable_sensor);
 
 /**
  * rmi_driver_set_input_params - set input device id and other data.
@@ -426,8 +440,7 @@ static int rmi_scan_pdt_page(struct rmi_device *rmi_dev,
 			     int page,
 			     void *ctx,
 			     int (*callback)(struct rmi_device *rmi_dev,
-					     void *ctx,
-					     const struct pdt_entry *entry))
+			     void *ctx, const struct pdt_entry *entry))
 {
 	struct rmi_driver_data *data = dev_get_drvdata(&rmi_dev->dev);
 	struct pdt_entry pdt_entry;
@@ -455,10 +468,9 @@ static int rmi_scan_pdt_page(struct rmi_device *rmi_dev,
 					RMI_SCAN_DONE : RMI_SCAN_CONTINUE;
 }
 
-static int rmi_scan_pdt(struct rmi_device *rmi_dev, void *ctx,
-			int (*callback)(struct rmi_device *rmi_dev,
-					void *ctx,
-					const struct pdt_entry *entry))
+int rmi_scan_pdt(struct rmi_device *rmi_dev, void *ctx,
+		 int (*callback)(struct rmi_device *rmi_dev,
+		 void *ctx, const struct pdt_entry *entry))
 {
 	int page;
 	int retval = RMI_SCAN_DONE;
@@ -471,6 +483,7 @@ static int rmi_scan_pdt(struct rmi_device *rmi_dev, void *ctx,
 
 	return retval < 0 ? retval : 0;
 }
+EXPORT_SYMBOL_GPL(rmi_scan_pdt);
 
 int rmi_read_register_desc(struct rmi_device *d, u16 addr,
 				struct rmi_register_descriptor *rdesc)
@@ -702,8 +715,8 @@ static int rmi_count_irqs(struct rmi_device *rmi_dev,
 	return RMI_SCAN_CONTINUE;
 }
 
-static int rmi_initial_reset(struct rmi_device *rmi_dev,
-			     void *ctx, const struct pdt_entry *pdt)
+int rmi_initial_reset(struct rmi_device *rmi_dev, void *ctx,
+		      const struct pdt_entry *pdt)
 {
 	int error;
 
@@ -738,6 +751,7 @@ static int rmi_initial_reset(struct rmi_device *rmi_dev,
 	/* F01 should always be on page 0. If we don't find it there, fail. */
 	return pdt->page_start == 0 ? RMI_SCAN_CONTINUE : -ENODEV;
 }
+EXPORT_SYMBOL_GPL(rmi_initial_reset);
 
 static int rmi_create_function(struct rmi_device *rmi_dev,
 			       void *ctx, const struct pdt_entry *pdt)
@@ -779,6 +793,8 @@ static int rmi_create_function(struct rmi_device *rmi_dev,
 
 	if (pdt->function_number == 0x01)
 		data->f01_container = fn;
+	else if (pdt->function_number == 0x34)
+		data->f34_container = fn;
 
 	list_add_tail(&fn->node, &data->function_list);
 
@@ -819,6 +835,7 @@ static int rmi_driver_remove(struct device *dev)
 {
 	struct rmi_device *rmi_dev = to_rmi_device(dev);
 
+	rmi_f34_remove_sysfs(rmi_dev);
 	rmi_free_function_list(rmi_dev);
 
 	return 0;
@@ -845,7 +862,7 @@ static inline int rmi_driver_of_probe(struct device *dev,
 }
 #endif
 
-static int rmi_probe_interrupts(struct rmi_driver_data *data)
+int rmi_probe_interrupts(struct rmi_driver_data *data)
 {
 	struct rmi_device *rmi_dev = data->rmi_dev;
 	struct device *dev = &rmi_dev->dev;
@@ -884,8 +901,9 @@ static int rmi_probe_interrupts(struct rmi_driver_data *data)
 
 	return retval;
 }
+EXPORT_SYMBOL_GPL(rmi_probe_interrupts);
 
-static int rmi_init_functions(struct rmi_driver_data *data)
+int rmi_init_functions(struct rmi_driver_data *data)
 {
 	struct rmi_device *rmi_dev = data->rmi_dev;
 	struct device *dev = &rmi_dev->dev;
@@ -922,6 +940,7 @@ err_destroy_functions:
 	rmi_free_function_list(rmi_dev);
 	return retval;
 }
+EXPORT_SYMBOL_GPL(rmi_init_functions);
 
 static int rmi_driver_probe(struct device *dev)
 {
@@ -1026,6 +1045,10 @@ static int rmi_driver_probe(struct device *dev)
 	if (retval)
 		goto err;
 
+	retval = rmi_f34_create_sysfs(rmi_dev);
+	if (retval)
+		goto err;
+
 	if (data->input) {
 		rmi_driver_set_input_name(rmi_dev, data->input);
 		if (!rmi_dev->xport->input) {
@@ -1039,7 +1062,7 @@ static int rmi_driver_probe(struct device *dev)
 
 	if (data->f01_container->dev.driver)
 		/* Driver already bound, so enable ATTN now. */
-		return enable_sensor(rmi_dev);
+		return rmi_enable_sensor(rmi_dev);
 
 	return 0;
 
