@@ -357,12 +357,29 @@ int rmi_f34_status(struct rmi_function *fn)
 	return f34->update_status;
 }
 
+int rmi_f34_check_supported(struct rmi_function *fn)
+{
+	u8 version = fn->fd.function_version;
+
+	/* Only version 0 currently supported */
+	if (version == 0) {
+		return 0;
+	} else {
+		dev_warn(&fn->dev, "F34 V%d not supported!\n", version);
+		return -ENOSYS;
+	}
+}
+
 static int rmi_f34_probe(struct rmi_function *fn)
 {
 	struct f34_data *f34;
 	unsigned char f34_queries[9];
 	bool has_config_id;
 	int ret;
+
+	ret = rmi_f34_check_supported(fn);
+	if (ret)
+		return ret;
 
 	f34 = devm_kzalloc(&fn->dev, sizeof(struct f34_data), GFP_KERNEL);
 	if (!f34)

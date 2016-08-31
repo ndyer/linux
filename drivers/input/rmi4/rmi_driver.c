@@ -1017,6 +1017,10 @@ static int rmi_firmware_update(struct rmi_driver_data *data,
 		return -EINVAL;
 	}
 
+	ret = rmi_f34_check_supported(data->f34_container);
+	if (ret)
+		return ret;
+
 	/* Enter flash mode */
 	rmi_dbg(RMI_DEBUG_CORE, dev, "Enabling flash\n");
 	ret = rmi_f34_enable_flash(data->f34_container);

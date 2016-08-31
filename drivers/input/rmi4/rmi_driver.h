@@ -102,6 +102,7 @@ char *rmi_f01_get_product_ID(struct rmi_function *fn);
 int rmi_f34_update_firmware(struct rmi_function *fn, const struct firmware *fw);
 int rmi_f34_enable_flash(struct rmi_function *fn);
 int rmi_f34_status(struct rmi_function *fn);
+int rmi_f34_check_supported(struct rmi_function *fn);
 
 extern struct rmi_function_handler rmi_f01_handler;
 extern struct rmi_function_handler rmi_f11_handler;
