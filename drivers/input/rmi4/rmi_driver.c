@@ -300,7 +300,7 @@ static void rmi_driver_set_input_name(struct rmi_device *rmi_dev,
 				struct input_dev *input)
 {
 	struct rmi_driver_data *data = dev_get_drvdata(&rmi_dev->dev);
-	char *device_name = rmi_f01_get_product_ID(data->f01_container);
+	const char *device_name = rmi_f01_get_product_ID(data->f01_container);
 	char *name;
 
 	name = devm_kasprintf(&rmi_dev->dev, GFP_KERNEL,
@@ -832,7 +832,109 @@ int rmi_driver_resume(struct rmi_device *rmi_dev)
 }
 EXPORT_SYMBOL_GPL(rmi_driver_resume);
 
+static ssize_t rmi_driver_manufacturer_id_show(struct device *dev,
+					       struct device_attribute *dattr,
+					       char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct rmi_function *fn = data->f01_container;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 rmi_f01_get_manufacturer_ID(fn));
+}
+
+static DEVICE_ATTR(manufacturer_id, S_IRUGO,
+		   rmi_driver_manufacturer_id_show, NULL);
+
+static ssize_t rmi_driver_date_of_manufacture_show(struct device *dev,
+						   struct device_attribute *dattr,
+						   char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct rmi_function *fn = data->f01_container;
+
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
+			 rmi_f01_get_date_of_manufacture(fn));
+}
+
+static DEVICE_ATTR(date_of_manufacture, S_IRUGO,
+		   rmi_driver_date_of_manufacture_show, NULL);
+
+static ssize_t rmi_driver_product_id_show(struct device *dev,
+					  struct device_attribute *dattr,
+					  char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct rmi_function *fn = data->f01_container;
+
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
+			 rmi_f01_get_product_ID(fn));
+}
+
+static DEVICE_ATTR(product_id, S_IRUGO,
+		   rmi_driver_product_id_show, NULL);
+
+static ssize_t rmi_driver_firmware_id_show(struct device *dev,
+					   struct device_attribute *dattr,
+					   char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct rmi_function *fn = data->f01_container;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 rmi_f01_get_firmware_ID(fn));
+}
+
+static DEVICE_ATTR(firmware_id, S_IRUGO,
+		   rmi_driver_firmware_id_show, NULL);
+
+static struct attribute *rmi_driver_f01_attrs[] = {
+	&dev_attr_manufacturer_id.attr,
+	&dev_attr_date_of_manufacture.attr,
+	&dev_attr_product_id.attr,
+	&dev_attr_firmware_id.attr,
+	NULL
+};
+
+static struct attribute_group rmi_driver_f01_attr_group = {
+	.attrs = rmi_driver_f01_attrs,
+};
+
 #ifdef CONFIG_RMI4_F34
+static ssize_t rmi_driver_bootloader_id_show(struct device *dev,
+					     struct device_attribute *dattr,
+					     char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct rmi_function *fn = data->f34_container;
+
+	if (fn)
+		return scnprintf(buf, PAGE_SIZE, "%s\n",
+				 rmi_f34_get_bootloader_ID(fn));
+
+	return 0;
+}
+
+static DEVICE_ATTR(bootloader_id, S_IRUGO,
+		   rmi_driver_bootloader_id_show, NULL);
+
+static ssize_t rmi_driver_configuration_id_show(struct device *dev,
+						struct device_attribute *dattr,
+						char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct rmi_function *fn = data->f34_container;
+
+	if (fn)
+		return scnprintf(buf, PAGE_SIZE, "%s\n",
+				 rmi_f34_get_configuration_ID(fn));
+
+	return 0;
+}
+
+static DEVICE_ATTR(configuration_id, S_IRUGO,
+		   rmi_driver_configuration_id_show, NULL);
+
 static int rmi_firmware_update(struct rmi_driver_data *data,
 			       const struct firmware *fw);
 
@@ -885,6 +987,8 @@ static DEVICE_ATTR(update_fw_status, S_IRUGO,
 		   rmi_driver_update_fw_status_show, NULL);
 
 static struct attribute *rmi_firmware_attrs[] = {
+	&dev_attr_bootloader_id.attr,
+	&dev_attr_configuration_id.attr,
 	&dev_attr_update_fw.attr,
 	&dev_attr_update_fw_status.attr,
 	NULL
@@ -898,6 +1002,8 @@ static struct attribute_group rmi_firmware_attr_group = {
 static int rmi_driver_remove(struct device *dev)
 {
 	struct rmi_device *rmi_dev = to_rmi_device(dev);
+
+	sysfs_remove_group(&rmi_dev->dev.kobj, &rmi_driver_f01_attr_group);
 
 #ifdef CONFIG_RMI4_F34
 	sysfs_remove_group(&rmi_dev->dev.kobj, &rmi_firmware_attr_group);
@@ -1174,6 +1280,10 @@ static int rmi_driver_probe(struct device *dev)
 		data->input->phys = devm_kasprintf(dev, GFP_KERNEL,
 						"%s/input0", dev_name(dev));
 	}
+
+	retval = sysfs_create_group(&dev->kobj, &rmi_driver_f01_attr_group);
+	if (retval)
+		goto err_destroy_functions;
 
 #ifdef CONFIG_RMI4_F34
 	retval = sysfs_create_group(&dev->kobj, &rmi_firmware_attr_group);

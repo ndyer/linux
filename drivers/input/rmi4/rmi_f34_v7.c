@@ -431,6 +431,7 @@ struct f34_data {
 	const unsigned char *image;
 	bool in_bl_mode;
 	int f34_status;
+	const char *config_id;
 };
 
 struct synaptics_fn {
@@ -851,8 +852,8 @@ static int fwu_read_f34_queries_bl_version(struct rmi_function *fn)
 	fwu->bootloader_id[0] = query_1_7.bl_minor_revision;
 	fwu->bootloader_id[1] = query_1_7.bl_major_revision;
 
-	dev_info(&fn->dev, "%s: Bootloader ver : [%d,%d]\n",
-		 __func__, fwu->bootloader_id[0],fwu->bootloader_id[1]);
+	dev_info(&fn->dev, "%s: Bootloader V%d.%d\n", __func__,
+		 fwu->bootloader_id[1],fwu->bootloader_id[0]);
 
 	return 0;
 }
@@ -920,6 +921,7 @@ static int fwu_read_f34_queries_v7(struct rmi_function *fn)
 	fwu->flash_properties.has_bl_config = query_1_7.has_global_parameters;
 
 	fwu->has_guest_code = query_1_7.has_guest_code;
+	fwu->flash_properties.has_config_id = query_0.has_config_id;
 
 	index = sizeof(query_1_7.data) - V7_PARTITION_SUPPORT_BYTES;
 
@@ -1943,6 +1945,42 @@ exit:
 	return ret;
 }
 
+const char *rmi_f34_get_bootloader_ID(struct rmi_function *fn)
+{
+	struct f34_data *fwu = dev_get_drvdata(&fn->dev);
+
+	return devm_kasprintf(&fn->dev, GFP_KERNEL, "%d%d",
+			      fwu->bootloader_id[1],fwu->bootloader_id[0]);
+}
+
+const char *rmi_f34_get_configuration_ID(struct rmi_function *fn)
+{
+	struct f34_data *fwu = dev_get_drvdata(&fn->dev);
+	char f34_ctrl[4];
+	int ret;
+
+	if (!fwu->flash_properties.has_config_id)
+		return NULL;
+
+	if (!fwu->config_id) {
+		ret = rmi_read_block(fn->rmi_dev,
+				fn->fd.control_base_addr,
+				f34_ctrl,
+				sizeof(f34_ctrl));
+		if (ret)
+			return NULL;
+
+		fwu->config_id = devm_kasprintf(&fn->dev, GFP_KERNEL,
+						"%02x%02x%02x%02x",
+						f34_ctrl[0], f34_ctrl[1],
+						f34_ctrl[2], f34_ctrl[3]);
+		if (!fwu->config_id)
+			return NULL;
+	}
+
+	return fwu->config_id;
+}
+
 int rmi_f34_status(struct rmi_function *fn)
 {
 	struct f34_data *fwu = dev_get_drvdata(&fn->dev);
@@ -1980,15 +2018,7 @@ static int rmi_f34_probe(struct rmi_function *fn)
 	}
 
 	/* Read bootloader version */
-	ret = rmi_read_block(fn->rmi_dev,
-			fn->fd.query_base_addr + BOOTLOADER_ID_OFFSET,
-			fwu->bootloader_id,
-			sizeof(fwu->bootloader_id));
-	if (ret < 0) {
-		dev_err(&fn->dev, "%s: Failed to read bootloader ID\n",
-			__func__);
-		return ret;
-	}
+	ret = fwu_read_f34_queries_bl_version(fn);
 
 	if (fwu->bootloader_id[1] == '5') {
 		fwu->bl_version = V5;

@@ -240,11 +240,32 @@ static int rmi_f01_read_properties(struct rmi_device *rmi_dev,
 	return 0;
 }
 
-char *rmi_f01_get_product_ID(struct rmi_function *fn)
+u8 rmi_f01_get_manufacturer_ID(struct rmi_function *fn)
+{
+	struct f01_data *f01 = dev_get_drvdata(&fn->dev);
+
+	return f01->properties.manufacturer_id;
+}
+
+const char *rmi_f01_get_date_of_manufacture(struct rmi_function *fn)
+{
+	struct f01_data *f01 = dev_get_drvdata(&fn->dev);
+
+	return f01->properties.dom;
+}
+
+const char *rmi_f01_get_product_ID(struct rmi_function *fn)
 {
 	struct f01_data *f01 = dev_get_drvdata(&fn->dev);
 
 	return f01->properties.product_id;
+}
+
+u32 rmi_f01_get_firmware_ID(struct rmi_function *fn)
+{
+	struct f01_data *f01 = dev_get_drvdata(&fn->dev);
+
+	return f01->properties.firmware_id;
 }
 
 #ifdef CONFIG_OF
