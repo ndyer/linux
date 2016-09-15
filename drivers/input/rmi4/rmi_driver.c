@@ -21,6 +21,7 @@
 #include <linux/pm.h>
 #include <linux/slab.h>
 #include <linux/of.h>
+#include <linux/bitops.h>
 #include <linux/firmware.h>
 #include <uapi/linux/input.h>
 #include <linux/rmi.h>
@@ -36,6 +37,8 @@
 #define DEFAULT_RESET_DELAY_MS	100
 
 #define V7_FLASH_STATUS_OFFSET 0
+
+#define HAS_BSR BIT(5)
 
 static void rmi_free_function_list(struct rmi_device *rmi_dev)
 {
@@ -997,6 +1000,11 @@ static int rmi_firmware_update(struct rmi_driver_data *data,
 		dev_warn(dev, "%s: No F34 present!\n",
 			 __func__);
 		return -EINVAL;
+	}
+
+	if (data->pdt_props & HAS_BSR) {
+		dev_err(dev, "%s: Reflash for LTS not supported\n", __func__);
+		return -ENODEV;
 	}
 
 	/* Enter flash mode */
