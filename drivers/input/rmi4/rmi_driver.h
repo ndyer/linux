@@ -99,6 +99,7 @@ void rmi_unregister_physical_driver(void);
 struct firmware;
 
 char *rmi_f01_get_product_ID(struct rmi_function *fn);
+int rmi_f34_status(struct rmi_function *fn);
 int fwu_start_reflash_v7(struct rmi_function *fn, const struct firmware *fw);
 int fwu_do_reflash_v7(struct rmi_function *fn, const struct firmware *fw);
 

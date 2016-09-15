@@ -430,6 +430,7 @@ struct f34_data {
 	const unsigned char *config_data;
 	const unsigned char *image;
 	bool in_bl_mode;
+	int f34_status;
 };
 
 struct synaptics_fn {
@@ -1393,6 +1394,11 @@ static int fwu_write_f34_v7_blocks(struct rmi_function *fn,
 
 		block_ptr += (transfer * fwu->block_size);
 		remaining -= transfer;
+
+		if (command == v7_CMD_WRITE_FW)
+			fwu->f34_status = 80 - 70*remaining/block_cnt;
+		else if (command == v7_CMD_WRITE_CONFIG)
+			fwu->f34_status = 90 - 10*remaining/block_cnt;
 	} while (remaining);
 
 	return 0;
@@ -1564,6 +1570,8 @@ int fwu_do_reflash_v7(struct rmi_function *fn, const struct firmware *fw)
 	if (ret < 0)
 		goto fail;
 
+	fwu->f34_status = 5;
+
 	if (!fwu->new_partition_table) {
 		ret = fwu_check_ui_firmware_size(fn);
 		if (ret < 0)
@@ -1602,6 +1610,8 @@ int fwu_do_reflash_v7(struct rmi_function *fn, const struct firmware *fw)
 		dev_info(&fn->dev, "%s: Partition table programmed\n", __func__);
 	}
 
+	fwu->f34_status = 10;
+
 	ret = fwu_write_firmware(fn);
 	if (ret < 0)
 		goto fail;
@@ -1621,6 +1631,8 @@ int fwu_do_reflash_v7(struct rmi_function *fn, const struct firmware *fw)
 		dev_info(&fn->dev, "%s: Display configuration programmed\n", __func__);
 	}
 
+	fwu->f34_status = 95;
+
 	if (fwu->new_partition_table) {
 		if (fwu->has_guest_code && fwu->v7_img.contains_guest_code) {
 			ret = fwu_write_guest_code(fn);
@@ -1630,7 +1642,11 @@ int fwu_do_reflash_v7(struct rmi_function *fn, const struct firmware *fw)
 		}
 	}
 
+	fwu->f34_status = 0;
+	return ret;
+
 fail:
+	fwu->f34_status = ret;
 	return ret;
 }
 
@@ -1925,6 +1941,13 @@ int fwu_start_reflash_v7(struct rmi_function *fn,
 
 exit:
 	return ret;
+}
+
+int rmi_f34_status(struct rmi_function *fn)
+{
+	struct f34_data *fwu = dev_get_drvdata(&fn->dev);
+
+	return fwu->f34_status;
 }
 
 static int rmi_f34_attention(struct rmi_function *fn, unsigned long *irq_bits)

@@ -868,8 +868,25 @@ static ssize_t rmi_driver_update_fw_store(struct device *dev,
 
 static DEVICE_ATTR(update_fw, S_IWUSR, NULL, rmi_driver_update_fw_store);
 
+static ssize_t rmi_driver_update_fw_status_show(struct device *dev,
+						struct device_attribute *dattr,
+						char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	int update_status = 0;
+
+	if (data->f34_container)
+		update_status = rmi_f34_status(data->f34_container);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", update_status);
+}
+
+static DEVICE_ATTR(update_fw_status, S_IRUGO,
+		   rmi_driver_update_fw_status_show, NULL);
+
 static struct attribute *rmi_firmware_attrs[] = {
 	&dev_attr_update_fw.attr,
+	&dev_attr_update_fw_status.attr,
 	NULL
 };
 
