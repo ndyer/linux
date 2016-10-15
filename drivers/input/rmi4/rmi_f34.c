@@ -12,6 +12,7 @@
 #include <linux/firmware.h>
 #include <asm/unaligned.h>
 #include <asm/unaligned.h>
+#include <linux/bitops.h>
 
 #include "rmi_driver.h"
 #include "rmi_f34.h"
@@ -58,9 +59,9 @@ static int rmi_f34_command(struct f34_data *f34, u8 command,
 			return ret;
 	}
 
-	init_completion(&f34->cmd_done);
+	init_completion(&f34->v5.cmd_done);
 
-	ret = rmi_read(rmi_dev, f34->ctrl_address, &f34->status);
+	ret = rmi_read(rmi_dev, f34->v5.ctrl_address, &f34->v5.status);
 	if (ret) {
 		dev_err(&f34->fn->dev,
 			"%s: Failed to read cmd register: %d (command %#02x)\n",
@@ -68,9 +69,9 @@ static int rmi_f34_command(struct f34_data *f34, u8 command,
 		return ret;
 	}
 
-	f34->status |= command & 0x0f;
+	f34->v5.status |= command & 0x0f;
 
-	ret = rmi_write(rmi_dev, f34->ctrl_address, f34->status);
+	ret = rmi_write(rmi_dev, f34->v5.ctrl_address, f34->v5.status);
 	if (ret < 0) {
 		dev_err(&f34->fn->dev,
 			"Failed to write F34 command %#02x: %d\n",
@@ -78,10 +79,10 @@ static int rmi_f34_command(struct f34_data *f34, u8 command,
 		return ret;
 	}
 
-	if (!wait_for_completion_timeout(&f34->cmd_done,
+	if (!wait_for_completion_timeout(&f34->v5.cmd_done,
 				msecs_to_jiffies(timeout))) {
 
-		ret = rmi_read(rmi_dev, f34->ctrl_address, &f34->status);
+		ret = rmi_read(rmi_dev, f34->v5.ctrl_address, &f34->v5.status);
 		if (ret) {
 			dev_err(&f34->fn->dev,
 				"%s: cmd %#02x timed out: %d\n",
@@ -89,10 +90,10 @@ static int rmi_f34_command(struct f34_data *f34, u8 command,
 			return ret;
 		}
 
-		if (f34->status & 0x7f) {
+		if (f34->v5.status & 0x7f) {
 			dev_err(&f34->fn->dev,
 				"%s: cmd %#02x timed out, status: %#02x\n",
-				__func__, command, f34->status);
+				__func__, command, f34->v5.status);
 			return -ETIMEDOUT;
 		}
 	}
@@ -105,12 +106,15 @@ static int rmi_f34_attention(struct rmi_function *fn, unsigned long *irq_bits)
 	struct f34_data *f34 = dev_get_drvdata(&fn->dev);
 	int ret;
 
-	ret = rmi_read(f34->fn->rmi_dev, f34->ctrl_address, &f34->status);
-	rmi_dbg(RMI_DEBUG_FN, &fn->dev, "%s: status: %#02x, ret: %d\n",
-		__func__, f34->status, ret);
+	if (f34->bl_version != BL_V5)
+		return 0;
 
-	if (!ret && !(f34->status & 0x7f))
-		complete(&f34->cmd_done);
+	ret = rmi_read(f34->fn->rmi_dev, f34->v5.ctrl_address, &f34->v5.status);
+	rmi_dbg(RMI_DEBUG_FN, &fn->dev, "%s: status: %#02x, ret: %d\n",
+		__func__, f34->v5.status, ret);
+
+	if (!ret && !(f34->v5.status & 0x7f))
+		complete(&f34->v5.cmd_done);
 
 	return 0;
 }
@@ -133,7 +137,7 @@ static int rmi_f34_write_blocks(struct f34_data *f34, const void *data,
 	}
 
 	for (i = 0; i < block_count; i++) {
-		ret = rmi_write_block(rmi_dev, address, data, f34->block_size);
+		ret = rmi_write_block(rmi_dev, address, data, f34->v5.block_size);
 		if (ret) {
 			dev_err(&fn->dev,
 				"failed to write block #%d: %d\n", i, ret);
@@ -151,7 +155,7 @@ static int rmi_f34_write_blocks(struct f34_data *f34, const void *data,
 		rmi_dbg(RMI_DEBUG_FN, &fn->dev, "wrote block %d of %d\n",
 			i + 1, block_count);
 
-		data += f34->block_size;
+		data += f34->v5.block_size;
 	}
 
 	return 0;
@@ -159,26 +163,24 @@ static int rmi_f34_write_blocks(struct f34_data *f34, const void *data,
 
 static int rmi_f34_write_firmware(struct f34_data *f34, const void *data)
 {
-	return rmi_f34_write_blocks(f34, data, f34->fw_blocks,
+	return rmi_f34_write_blocks(f34, data, f34->v5.fw_blocks,
 				    F34_WRITE_FW_BLOCK);
 }
 
 static int rmi_f34_write_config(struct f34_data *f34, const void *data)
 {
-	return rmi_f34_write_blocks(f34, data, f34->config_blocks,
+	return rmi_f34_write_blocks(f34, data, f34->v5.config_blocks,
 				    F34_WRITE_CONFIG_BLOCK);
 }
 
-int rmi_f34_enable_flash(struct rmi_function *fn)
+int rmi_f34_enable_flash(struct f34_data *f34)
 {
-	struct f34_data *f34 = dev_get_drvdata(&fn->dev);
-
 	return rmi_f34_command(f34, F34_ENABLE_FLASH_PROG,
 			       F34_ENABLE_WAIT_MS, true);
 }
 
 static int rmi_f34_flash_firmware(struct f34_data *f34,
-					 const struct rmi_f34_firmware *syn_fw)
+				  const struct rmi_f34_firmware *syn_fw)
 {
 	struct rmi_function *fn = f34->fn;
 	int ret;
@@ -223,9 +225,8 @@ static int rmi_f34_flash_firmware(struct f34_data *f34,
 	return 0;
 }
 
-int rmi_f34_update_firmware(struct rmi_function *fn, const struct firmware *fw)
+int rmi_f34_update_firmware(struct f34_data *f34, const struct firmware *fw)
 {
-	struct f34_data *f34 = dev_get_drvdata(&fn->dev);
 	const struct rmi_f34_firmware *syn_fw;
 	int ret;
 
@@ -233,73 +234,62 @@ int rmi_f34_update_firmware(struct rmi_function *fn, const struct firmware *fw)
 	BUILD_BUG_ON(offsetof(struct rmi_f34_firmware, data) !=
 			F34_FW_IMAGE_OFFSET);
 
-	rmi_dbg(RMI_DEBUG_FN, &fn->dev,
+	rmi_dbg(RMI_DEBUG_FN, &f34->fn->dev,
 		"FW size:%d, checksum:%08x, image_size:%d, config_size:%d\n",
 		(int)fw->size,
 		le32_to_cpu(syn_fw->checksum),
 		le32_to_cpu(syn_fw->image_size),
 		le32_to_cpu(syn_fw->config_size));
 
-	dev_info(&fn->dev,
+	dev_info(&f34->fn->dev,
 		"FW bootloader_id:%02x, product_id:%.*s, info: %02x%02x\n",
 		syn_fw->bootloader_version,
 		(int)sizeof(syn_fw->product_id), syn_fw->product_id,
 		syn_fw->product_info[0], syn_fw->product_info[1]);
 
 	if (syn_fw->image_size &&
-	    syn_fw->image_size != f34->fw_blocks * f34->block_size) {
-		dev_err(&fn->dev,
+	    syn_fw->image_size != f34->v5.fw_blocks * f34->v5.block_size) {
+		dev_err(&f34->fn->dev,
 			"Bad firmware image: fw size %d, expected %d\n",
 			syn_fw->image_size,
-			f34->fw_blocks * f34->block_size);
+			f34->v5.fw_blocks * f34->v5.block_size);
 		ret = -EILSEQ;
 		goto out;
 	}
 
 	if (syn_fw->config_size &&
-	    syn_fw->config_size != f34->config_blocks * f34->block_size) {
-		dev_err(&fn->dev,
+	    syn_fw->config_size != f34->v5.config_blocks * f34->v5.block_size) {
+		dev_err(&f34->fn->dev,
 			"Bad firmware image: config size %d, expected %d\n",
 			syn_fw->config_size,
-			f34->config_blocks * f34->block_size);
+			f34->v5.config_blocks * f34->v5.block_size);
 		ret = -EILSEQ;
 		goto out;
 	}
 
 	if (syn_fw->image_size && !syn_fw->config_size) {
-		dev_err(&fn->dev, "Bad firmware image: no config data\n");
+		dev_err(&f34->fn->dev, "Bad firmware image: no config data\n");
 		ret = -EILSEQ;
 		goto out;
 	}
 
-	dev_info(&fn->dev, "Starting firmware update\n");
-	mutex_lock(&f34->flash_mutex);
+	dev_info(&f34->fn->dev, "Starting firmware update\n");
+	mutex_lock(&f34->v5.flash_mutex);
 
 	ret = rmi_f34_flash_firmware(f34, syn_fw);
-	dev_info(&fn->dev, "Firmware update complete, status:%d\n", ret);
+	dev_info(&f34->fn->dev, "Firmware update complete, status:%d\n", ret);
 
-	mutex_unlock(&f34->flash_mutex);
+	mutex_unlock(&f34->v5.flash_mutex);
 
 out:
 	return ret;
-}
-
-int rmi_f34_check_supported(struct rmi_function *fn)
-{
-	u8 version = fn->fd.function_version;
-
-	/* Only version 0 currently supported */
-	if (version == 0)
-		return 0;
-
-	dev_warn(&fn->dev, "F34 V%d not supported!\n", version);
-	return -ENODEV;
 }
 
 static int rmi_firmware_update(struct rmi_driver_data *data,
 			       const struct firmware *fw)
 {
 	struct device *dev = &data->rmi_dev->dev;
+	struct f34_data *f34;
 	int ret;
 
 	if (!data->f34_container) {
@@ -307,13 +297,24 @@ static int rmi_firmware_update(struct rmi_driver_data *data,
 		return -EINVAL;
 	}
 
-	ret = rmi_f34_check_supported(data->f34_container);
-	if (ret)
-		return ret;
+	f34 = dev_get_drvdata(&data->f34_container->dev);
+
+	if (f34->bl_version == BL_V7) {
+		if (data->pdt_props & HAS_BSR) {
+			dev_err(dev, "%s: LTS not supported\n", __func__);
+			return -ENODEV;
+		}
+	} else if (data->f34_container->fd.function_version != 0) {
+		dev_err(dev, "%s: Version not supported\n", __func__);
+		return -ENODEV;
+	}
 
 	/* Enter flash mode */
 	rmi_dbg(RMI_DEBUG_FN, dev, "Enabling flash\n");
-	ret = rmi_f34_enable_flash(data->f34_container);
+	if (f34->bl_version == BL_V7)
+		ret = rmi_f34v7_start_reflash(f34, fw);
+	else
+		ret = rmi_f34_enable_flash(f34);
 	if (ret)
 		return ret;
 
@@ -328,14 +329,19 @@ static int rmi_firmware_update(struct rmi_driver_data *data,
 	if (ret)
 		return ret;
 
-	if (!data->f01_bootloader_mode || !data->f34_container) {
+	if (!data->bootloader_mode || !data->f34_container) {
 		dev_warn(dev, "%s: No F34 present or not in bootloader!\n",
-			 __func__);
+				__func__);
 		return -EINVAL;
 	}
 
+	f34 = dev_get_drvdata(&data->f34_container->dev);
+
 	/* Perform firmware update */
-	ret = rmi_f34_update_firmware(data->f34_container, fw);
+	if (f34->bl_version == BL_V7)
+		ret = rmi_f34v7_do_reflash(f34, fw);
+	else
+		ret = rmi_f34_update_firmware(f34, fw);
 
 	/* Re-probe */
 	rmi_dbg(RMI_DEBUG_FN, dev, "Re-probing device\n");
@@ -408,11 +414,8 @@ static int rmi_f34_probe(struct rmi_function *fn)
 	struct f34_data *f34;
 	unsigned char f34_queries[9];
 	bool has_config_id;
+	u8 version = fn->fd.function_version;
 	int ret;
-
-	ret = rmi_f34_check_supported(fn);
-	if (ret)
-		return ret;
 
 	f34 = devm_kzalloc(&fn->dev, sizeof(struct f34_data), GFP_KERNEL);
 	if (!f34)
@@ -421,31 +424,37 @@ static int rmi_f34_probe(struct rmi_function *fn)
 	f34->fn = fn;
 	dev_set_drvdata(&fn->dev, f34);
 
-	mutex_init(&f34->flash_mutex);
-	init_completion(&f34->cmd_done);
+	/* v5 code only supported version 0, try V7 probe */
+	if (version > 0)
+		return rmi_f34v7_probe(f34);
+
+	f34->bl_version = BL_V5;
 
 	ret = rmi_read_block(fn->rmi_dev, fn->fd.query_base_addr,
 			     f34_queries, sizeof(f34_queries));
 	if (ret) {
 		dev_err(&fn->dev, "%s: Failed to query properties\n",
-				__func__);
+			__func__);
 		return ret;
 	}
 
 	snprintf(f34->bootloader_id, sizeof(f34->bootloader_id),
 		 "%c%c", f34_queries[0], f34_queries[1]);
 
-	f34->block_size = get_unaligned_le16(&f34_queries[3]);
-	f34->fw_blocks = get_unaligned_le16(&f34_queries[5]);
-	f34->config_blocks = get_unaligned_le16(&f34_queries[7]);
-	f34->ctrl_address = fn->fd.data_base_addr + F34_BLOCK_DATA_OFFSET +
-		f34->block_size;
+	mutex_init(&f34->v5.flash_mutex);
+	init_completion(&f34->v5.cmd_done);
+
+	f34->v5.block_size = get_unaligned_le16(&f34_queries[3]);
+	f34->v5.fw_blocks = get_unaligned_le16(&f34_queries[5]);
+	f34->v5.config_blocks = get_unaligned_le16(&f34_queries[7]);
+	f34->v5.ctrl_address = fn->fd.data_base_addr + F34_BLOCK_DATA_OFFSET +
+		f34->v5.block_size;
 	has_config_id = f34_queries[2] & (1 << 2);
 
 	dev_info(&fn->dev, "Bootloader ID: %s\n", f34->bootloader_id);
-	rmi_dbg(RMI_DEBUG_FN, &fn->dev, "Block size: %d\n", f34->block_size);
-	rmi_dbg(RMI_DEBUG_FN, &fn->dev, "FW blocks: %d\n", f34->fw_blocks);
-	rmi_dbg(RMI_DEBUG_FN, &fn->dev, "CFG blocks: %d\n", f34->config_blocks);
+	rmi_dbg(RMI_DEBUG_FN, &fn->dev, "Block size: %d\n", f34->v5.block_size);
+	rmi_dbg(RMI_DEBUG_FN, &fn->dev, "FW blocks: %d\n", f34->v5.fw_blocks);
+	rmi_dbg(RMI_DEBUG_FN, &fn->dev, "CFG blocks: %d\n", f34->v5.config_blocks);
 
 	if (has_config_id) {
 		ret = rmi_read_block(fn->rmi_dev, fn->fd.control_base_addr,
