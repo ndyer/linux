@@ -157,6 +157,9 @@ static int rmi_f34_write_blocks(struct f34_data *f34, const void *data,
 			i + 1, block_count);
 
 		data += f34->v5.block_size;
+		f34->update_progress += f34->v5.block_size;
+		f34->update_status = (f34->update_progress * 100) /
+			f34->update_size;
 	}
 
 	return 0;
@@ -186,6 +189,8 @@ static int rmi_f34_flash_firmware(struct f34_data *f34,
 	struct rmi_function *fn = f34->fn;
 	int ret;
 
+	f34->update_progress = 0;
+	f34->update_size = syn_fw->image_size + syn_fw->config_size;
 	if (syn_fw->image_size) {
 		dev_info(&fn->dev, "Erasing firmware...\n");
 		ret = rmi_f34_command(f34, F34_ERASE_ALL,
@@ -277,10 +282,22 @@ int rmi_f34_update_firmware(struct f34_data *f34, const struct firmware *fw)
 
 	ret = rmi_f34_flash_firmware(f34, syn_fw);
 
+	f34->update_status = ret;
 	mutex_unlock(&f34->v5.flash_mutex);
 
 out:
 	return ret;
+}
+
+int rmi_f34_status(struct rmi_function *fn)
+{
+	struct f34_data *f34 = dev_get_drvdata(&fn->dev);
+
+	/*
+	 * The status is the percentage complete, or once complete,
+	 * zero for success or a negative return code.
+	 */
+	return f34->update_status;
 }
 
 static int rmi_firmware_update(struct rmi_driver_data *data,
@@ -402,8 +419,25 @@ static ssize_t rmi_driver_update_fw_store(struct device *dev,
 
 static DEVICE_ATTR(update_fw, 0200, NULL, rmi_driver_update_fw_store);
 
+static ssize_t rmi_driver_update_fw_status_show(struct device *dev,
+						struct device_attribute *dattr,
+						char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	int update_status = 0;
+
+	if (data->f34_container)
+		update_status = rmi_f34_status(data->f34_container);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", update_status);
+}
+
+static DEVICE_ATTR(update_fw_status, 0444,
+		   rmi_driver_update_fw_status_show, NULL);
+
 static struct attribute *rmi_firmware_attrs[] = {
 	&dev_attr_update_fw.attr,
+	&dev_attr_update_fw_status.attr,
 	NULL
 };
 
