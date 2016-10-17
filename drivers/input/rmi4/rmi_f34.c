@@ -486,6 +486,21 @@ static ssize_t rmi_driver_configuration_id_show(struct device *dev,
 static DEVICE_ATTR(configuration_id, 0444,
 		   rmi_driver_configuration_id_show, NULL);
 
+static ssize_t rmi_driver_package_id_show(struct device *dev,
+					  struct device_attribute *dattr,
+					  char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct rmi_function *fn = data->f01_container;
+
+	u32 package_id = rmi_f01_get_package_ID(fn);
+
+	return scnprintf(buf, PAGE_SIZE, "%04x.%04x\n",
+			 package_id & 0xffff, (package_id >> 16) & 0xffff);
+}
+
+static DEVICE_ATTR(package_id, 0444, rmi_driver_package_id_show, NULL);
+
 static int rmi_firmware_update(struct rmi_driver_data *data,
 			       const struct firmware *fw);
 
@@ -545,6 +560,7 @@ static struct attribute *rmi_firmware_attrs[] = {
 	&dev_attr_manufacturer_id.attr,
 	&dev_attr_date_of_manufacture.attr,
 	&dev_attr_product_id.attr,
+	&dev_attr_package_id.attr,
 	&dev_attr_firmware_id.attr,
 	&dev_attr_update_fw.attr,
 	&dev_attr_update_fw_status.attr,
