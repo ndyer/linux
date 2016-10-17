@@ -109,6 +109,7 @@ const char *rmi_f01_get_product_ID(struct rmi_function *fn);
 u8 rmi_f01_get_manufacturer_ID(struct rmi_function *fn);
 const char *rmi_f01_get_date_of_manufacture(struct rmi_function *fn);
 u32 rmi_f01_get_firmware_ID(struct rmi_function *fn);
+u32 rmi_f01_get_package_ID(struct rmi_function *fn);
 
 #ifdef CONFIG_RMI4_F34
 int rmi_f34_create_sysfs(struct rmi_device *rmi_dev);
