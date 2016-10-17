@@ -55,6 +55,7 @@ struct f01_basic_properties {
 	u8 product_id[RMI_PRODUCT_ID_LENGTH + 1];
 	u16 productinfo;
 	u32 firmware_id;
+	u32 package_id;
 };
 
 /* F01 device status bits */
@@ -221,8 +222,22 @@ static int rmi_f01_read_properties(struct rmi_device *rmi_dev,
 			has_build_id_query = !!(queries[0] & BIT(1));
 		}
 
-		if (has_package_id_query)
+		if (has_package_id_query) {
+			ret = rmi_read_block(rmi_dev, prod_info_addr,
+					     queries, 4);
+			if (ret) {
+				dev_err(&rmi_dev->dev,
+					"Failed to read package info: %d\n",
+					ret);
+				return ret;
+			}
+
+			props->package_id = queries[3] << 24 |
+					    queries[2] << 16 |
+					    queries[1] << 8 |
+					    queries[0];
 			prod_info_addr++;
+		}
 
 		if (has_build_id_query) {
 			ret = rmi_read_block(rmi_dev, prod_info_addr, queries,
@@ -268,6 +283,13 @@ u32 rmi_f01_get_firmware_ID(struct rmi_function *fn)
 	struct f01_data *f01 = dev_get_drvdata(&fn->dev);
 
 	return f01->properties.firmware_id;
+}
+
+u32 rmi_f01_get_package_ID(struct rmi_function *fn)
+{
+	struct f01_data *f01 = dev_get_drvdata(&fn->dev);
+
+	return f01->properties.package_id;
 }
 
 #ifdef CONFIG_OF
