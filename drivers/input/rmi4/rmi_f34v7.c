@@ -926,6 +926,11 @@ static int rmi_f34v7_write_f34v7_blocks(struct f34_data *f34,
 
 		block_ptr += (transfer * f34->v7.block_size);
 		remaining -= transfer;
+
+		if (command == v7_CMD_WRITE_FW)
+			f34->update_status = 80 - 70*remaining/block_cnt;
+		else if (command == v7_CMD_WRITE_CONFIG)
+			f34->update_status = 90 - 10*remaining/block_cnt;
 	} while (remaining);
 
 	return 0;
@@ -1281,6 +1286,8 @@ int rmi_f34v7_do_reflash(struct f34_data *f34, const struct firmware *fw)
 	if (ret < 0)
 		goto fail;
 
+	f34->update_status = 5;
+
 	if (!f34->v7.new_partition_table) {
 		ret = rmi_f34v7_check_ui_firmware_size(f34);
 		if (ret < 0)
@@ -1320,6 +1327,7 @@ int rmi_f34v7_do_reflash(struct f34_data *f34, const struct firmware *fw)
 			 __func__);
 	}
 
+	f34->update_status = 10;
 	dev_info(&f34->fn->dev, "Writing firmware (%d bytes)...\n",
 		 f34->v7.img.ui_firmware.size);
 
@@ -1344,6 +1352,8 @@ int rmi_f34v7_do_reflash(struct f34_data *f34, const struct firmware *fw)
 			goto fail;
 	}
 
+	f34->update_status = 95;
+
 	if (f34->v7.new_partition_table) {
 		if (f34->v7.has_guest_code && f34->v7.img.contains_guest_code) {
 			dev_info(&f34->fn->dev, "Writing guest code...\n");
@@ -1354,7 +1364,11 @@ int rmi_f34v7_do_reflash(struct f34_data *f34, const struct firmware *fw)
 		}
 	}
 
+	f34->update_status = 0;
+	return 0;
+
 fail:
+	f34->update_status = ret;
 	return ret;
 }
 
