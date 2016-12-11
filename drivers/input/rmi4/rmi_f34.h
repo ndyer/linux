@@ -145,7 +145,7 @@ struct f34v7_data_1_5 {
 } __packed;
 
 struct block_data {
-	const u8 *data;
+	const void *data;
 	int size;
 };
 
@@ -290,8 +290,8 @@ struct f34v7_data {
 	struct physical_address phyaddr;
 	struct image_metadata img;
 
-	const u8 *config_data;
-	const u8 *image;
+	const void *config_data;
+	const void *image;
 };
 
 struct f34_data {
